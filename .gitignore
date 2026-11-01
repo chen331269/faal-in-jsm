@@ -5,3 +5,4 @@ out/
 *.csv
 *.obj
 *.pdb
+!source/*.zip
