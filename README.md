@@ -219,7 +219,6 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ## 11. 致谢
 
-- **FAAL 滤波器**：[chen331269/FAAL-Filter](https://github.com/chen331269/FAAL-Filter) —— 算法设计、参数语义与实现
 - **JoyShockMapper**：Jibb Smart / Nicolas Lessard（MIT），陀螺仪空间转换的工程实践
 - **One Euro Filter**：Casiez, Roussel, Vogel, CHI 2012 —— 自适应低通的基础
 - **FakerInput**：Ryochan7（MIT）—— 虚拟 HID 输入后端
