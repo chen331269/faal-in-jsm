@@ -21,11 +21,15 @@ FAAL 的抑制逻辑建立在**二维意图**上：横向甩枪和纵向抖动�
 
 不需要复刻游戏内部的算法。游戏的空间转换对陀螺仪向量是**齐次**的：
 
-$$T(s \cdot V) = s \cdot T(V)$$
+```text
+T(s · V) = s · T(V)
+```
 
 而乘法在齐次映射下可交换。所以在**同一个基**上做乘法，就会原样传递到游戏的二维输出：
 
-$$T\big(\mathrm{diag}(s_{yaw}, s_{pitch}, 1)\cdot V\big) = \big(s_{yaw}\,T_{yaw}(V),\; s_{pitch}\,T_{pitch}(V)\big)$$
+```text
+T( diag(s_yaw, s_pitch, 1) · V ) = ( s_yaw · T_yaw(V),  s_pitch · T_pitch(V) )
+```
 
 **只需要对齐"基"，不需要复刻"算法"。** 四元数、反投影矩阵、姿态追踪，一样都不用。
 
@@ -52,14 +56,14 @@ pitch  = -gx
 
 对这两个标量分别跑 FAAL，得到滤波后的值，再取比例折回三维：
 
-$$
-s_{yaw} = \frac{\text{yaw}_{filtered}}{\text{yaw}_{raw}},\qquad
-s_{pitch} = \frac{\text{pitch}_{filtered}}{\text{pitch}_{raw}}
-$$
+```
+s_yaw   = yaw_filtered   / yaw_raw
+s_pitch = pitch_filtered / pitch_raw
+```
 
-$$
-V' = \big(X \cdot s_{pitch},\;\; Y \cdot s_{yaw},\;\; Z \cdot s_{yaw}\big)
-$$
+```
+V' = ( X * s_pitch,  Y * s_yaw,  Z * s_yaw )
+```
 
 两个方向的映射都是齐次的，所以上式是**精确**的，不是近似：
 缩放 `(Y,Z)` 会让游戏收到的 yaw 精确缩放 `s_yaw`，缩放 `X` 会让 pitch 精确缩放 `s_pitch`。
