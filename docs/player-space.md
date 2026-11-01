@@ -211,3 +211,4 @@ FAAL_TRACE_STOP       # 停止并写出 faal_trace.csv
 - FAAL 算法：本项目原始设计与实现
 - One Euro Filter — Casiez, Roussel, Vogel, CHI 2012
 - 陀螺仪空间转换的工程实践：JoyShockMapper / Jibb Smart
+- 逐帧记录方案、离线分析工具、线程审计与文中全部数据统计：与 DeepSeek 协作完成

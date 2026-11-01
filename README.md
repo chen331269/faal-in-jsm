@@ -192,5 +192,23 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 - `patch/changes.diff` —— 完整改动，可应用到 `hotuns/JoyShockMapper`（`jsm-studio` 分支）
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
 
-JSM 与其依赖均为 MIT 许可；FAAL 算法的设计、参数语义与实现见
-[chen331269/FAAL-Filter](https://github.com/chen331269/FAAL-Filter)。
+---
+
+## 11. 致谢
+
+- **FAAL 滤波器**：[chen331269/FAAL-Filter](https://github.com/chen331269/FAAL-Filter) —— 算法设计、参数语义与实现
+- **JoyShockMapper**：Jibb Smart / Nicolas Lessard（MIT），陀螺仪空间转换的工程实践
+- **One Euro Filter**：Casiez, Roussel, Vogel, CHI 2012 —— 自适应低通的基础
+- **FakerInput**：Ryochan7（MIT）—— 虚拟 HID 输入后端
+- **SDL3 / ViGEmClient / magic_enum / pocket_fsm / GamepadMotionHelpers**：见 `LICENSE.md`
+- **逐帧记录方案、三个离线分析工具、线程审计，以及文中全部数据统计**：与 DeepSeek 协作完成
+
+---
+
+## 12. 相关
+
+- 算法与参数：[FAAL-Filter](https://github.com/chen331269/FAAL-Filter)
+- 宿主项目：[hotuns/JoyShockMapper](https://github.com/hotuns/JoyShockMapper)（`jsm-studio` 分支）
+- 上游：[Electronicks/JoyShockMapper](https://github.com/Electronicks/JoyShockMapper)
+
+本项目与其依赖均为 MIT 许可，许可全文与依赖清单见 [`LICENSE.md`](LICENSE.md)。
