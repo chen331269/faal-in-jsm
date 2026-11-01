@@ -4,21 +4,27 @@
 
 ## 1. 取源码
 
-补丁把 **`jsm-studio` 分支（v0.2.4 所指的 `50cd082`）** 变成 `dist/` 里那个二进制对应的源码。
-已验证 `git apply --check` 通过。
+**最省事的方式：直接用 [`source/JSM-FAAL-src.zip`](source/JSM-FAAL-src.zip)。**
+这是产出 `dist/` 里那个二进制时的**完整源码**（81 个文件 / 0.19 MB），
+解压即可编译，不需要打补丁、也不依赖任何分支状态。
+
+```bash
+unzip source/JSM-FAAL-src.zip -d .
+cd JSM-FAAL-src
+```
+
+**另一种方式：从公开分支 + 补丁。** 补丁把 `jsm-studio@50cd082` 变成同一份源码，
+已验证 `git apply --check` 通过：
 
 ```bash
 git clone -b jsm-studio https://github.com/hotuns/JoyShockMapper.git
-cd JoyShockMapper
-git checkout 50cd082
+cd JoyShockMapper && git checkout 50cd082
 git apply ../patch/changes.diff
 ```
 
-补丁内容：新增 `FAALSettings.h` / `faal_filter.h` / `faal_filter.cpp`，修改 `main.cpp` 与 `SettingsManager.cpp`。
-
-> **说明**：补丁里包含 FAAL 接入本身（这部分原本只在作者的本地快照里，分支上没有），
-> 因此它同时把快照与分支之间约 19 行的差异一并对齐——目的是让"应用补丁后的源码"
-> 与"发布出来的二进制"完全对应，而不是只挑出某几步改动。
+> 两种方式得到的源码是同一份。补丁里包含 FAAL 接入本身（原本只在作者本地快照里，
+> 分支上没有），所以它也把快照与分支之间约 19 行的差异一并对齐了——
+> 目的是让源码与二进制完全对应，而不是只挑出某几步改动。
 
 ## 2. 编译
 
