@@ -4,14 +4,20 @@
 
 ## 1. 取源码
 
+**补丁的基准是 JSM Studio 0.2.4 的源码快照**（已包含 FAAL 接入），不是 `jsm-studio` 分支头。
+补丁只含本文所述的改动：`+311 / -71` 行，集中在 `initJsmSettings()`、`joyShockPollCallback()`、
+`setGyro()` 调用点、`SettingsManager` 的 FAAL 注册块。
+
 ```bash
+# 拿一份 0.2.4 时期的源码（tag v0.2.4 的子模块指针是 50cd082）
 git clone -b jsm-studio https://github.com/hotuns/JoyShockMapper.git
 cd JoyShockMapper
-git apply ../patch/changes.diff      # 本仓库的补丁
+git checkout 50cd082
+git apply -3 ../patch/changes.diff     # -3 允许三方合并，冲突时手工处理
 ```
 
-补丁基于 `jsm-studio` 分支的 `50cd082`（2026-11）验证可用；
-它新增 `FAALSettings.h` / `faal_filter.h` / `faal_filter.cpp`，修改 `main.cpp` 与 `SettingsManager.cpp`。
+> 该快照与当前 `jsm-studio` HEAD 约有 19 行差异（分支有、快照没有），
+> 若直接应用出现冲突，位置集中在 `joyShockPollCallback()` 附近，按 hunk 手工合并即可。
 
 ## 2. 编译
 

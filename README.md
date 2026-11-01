@@ -197,7 +197,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ## 10. 代码
 
-- `patch/changes.diff` —— 完整改动，可应用到 `hotuns/JoyShockMapper`（`jsm-studio` 分支）
+- `patch/changes.diff` —— 本文所述的全部改动（+311/-71），基于 JSM Studio 0.2.4 快照；应用方式见 `BUILD.md`
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
 
 ---
