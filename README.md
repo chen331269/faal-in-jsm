@@ -197,7 +197,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ## 10. 代码
 
-- `patch/changes.diff` —— 本文所述的全部改动（+311/-71），基于 JSM Studio 0.2.4 快照；应用方式见 `BUILD.md`
+- `patch/changes.diff` —— 把 `jsm-studio@50cd082` 变成发布源码的完整补丁，应用方式见 `BUILD.md`
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
 
 ---
