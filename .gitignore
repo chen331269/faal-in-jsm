@@ -1,0 +1,9 @@
+build/
+out/
+.vs/
+*.zip
+*.csv
+*.obj
+*.exe
+*.dll
+*.pdb
