@@ -130,8 +130,33 @@ JSM 用它而不是 `SendInput`，是因为注入层级不同：
 
 ---
 
-## 7. 工具与复现
+## 7. 直接跑一遍
 
+`dist/` 里是编译好的可执行文件（Windows x64 Release），对应本仓库的 patch：
+
+| 文件 | 说明 |
+|---|---|
+| `JoyShockMapper.exe` | 主程序（含 FAAL 与 PS_MOTION 预处理） |
+| `SDL3.dll` | 手柄输入后端 |
+| `FakerInputDll.dll` | 虚拟输入后端 |
+
+**前提**：FakerInput **驱动**需要单独安装（管理员权限，会创建虚拟 HID 设备）；
+本仓库只带用户态 DLL。二进制未签名，首次运行会被 SmartScreen 拦截。
+
+跑起来之后：
+
+```
+FAAL_PSMOTION        # 切换预处理开关，A/B 对比手感
+FAAL_TRACE_START     # 开始记录
+FAAL_TRACE_STOP      # 停止并写出 faal_trace.csv
+```
+
+> 想自己编译验证：把 `patch/changes.diff` 应用到 hotuns/JoyShockMapper 的 `jsm-studio` 分支，
+> 按上游 CMake 流程构建即可。
+
+---
+
+## 8. 工具与复现
 记录每帧的：滤波前二维值、当帧生效的 4 个参数、**空间转换前的原始三维陀螺仪**、
 **重力向量**、**四元数**、**实际输出的向量**。
 
@@ -150,7 +175,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ---
 
-## 8. 边界
+## 9. 边界
 
 1. **只对玩家空间成立**——换成世界空间映射会破坏齐次性，折回三维会出现预料之外的旋转；
 2. 世界空间游戏会偏折（二维方向差 p50 3.7° / p99 20.8°，串扰约 9%~18%）；
@@ -160,7 +185,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ---
 
-## 9. 代码
+## 10. 代码
 
 - `patch/changes.diff` —— 完整改动，可应用到 `hotuns/JoyShockMapper`（`jsm-studio` 分支）
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由

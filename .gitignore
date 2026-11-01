@@ -4,6 +4,4 @@ out/
 *.zip
 *.csv
 *.obj
-*.exe
-*.dll
 *.pdb
