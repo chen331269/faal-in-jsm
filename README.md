@@ -120,9 +120,19 @@ OFF 段证明测量链路本身不引入误差；ON 段证明压制是真的、�
 
 ## 6. FakerInput 是什么
 
-代码改动落在这条路径上，所以单独说明。**FakerInput** 是 Windows 的虚拟 HID 驱动 + 用户态 DLL
-（上游：Ryochan7/FakerInput）。它注册一个虚拟键盘/鼠标设备，应用通过 `FakerInputDll.dll`
-把事件写进去，系统当作真实硬件处理。
+先澄清一个容易搞混的点：**FakerInput 不是 PS_MOTION 专用**，它是 JSM 全局的键鼠注入后端。
+`InputHelpers.cpp` 里所有鼠标移动、按键、滚轮都先尝试走它，不可用时才回退到 `SendInput`。
+
+| 分支 | 输出去向 | 经过 FakerInput 吗 |
+|---|---|---|
+| 鼠标模式 | 鼠标位移 / 按键 | ✅ 是 |
+| PS_MOTION | ViGEm 虚拟手柄的陀螺仪数据 | ❌ 否 |
+
+也就是说本文记录的 PS_MOTION 改动**不经过它**；之所以还要提，是因为发布包里带了
+`FakerInputDll.dll`，而它是杀软误报的两个主要来源之一（另一个是 ViGEm 虚拟手柄）。
+
+**FakerInput** 是 Windows 的虚拟 HID 驱动 + 用户态 DLL（上游：Ryochan7/FakerInput）。
+它注册一个虚拟键盘/鼠标设备，应用通过 `FakerInputDll.dll` 把事件写进去，系统当作真实硬件处理。
 
 JSM 用它而不是 `SendInput`，是因为注入层级不同：
 
