@@ -157,8 +157,12 @@ FAAL_TRACE_START     # 开始记录
 FAAL_TRACE_STOP      # 停止并写出 faal_trace.csv
 ```
 
-> 想自己编译验证：把 `patch/changes.diff` 应用到 hotuns/JoyShockMapper 的 `jsm-studio` 分支，
-> 按上游 CMake 流程构建即可。
+> **不想直接运行二进制？** 可以自己编译验证：见 [`BUILD.md`](BUILD.md) 的完整步骤
+> （克隆 `jsm-studio` 分支 → `git apply patch/changes.diff` → CMake 构建），
+> 下载到的文件也可以用 [`dist/SHA256SUMS`](dist/SHA256SUMS) 校验。
+>
+> 注意：本程序会创建虚拟手柄并通过 FakerInput 注入键鼠事件，**被部分杀软/反作弊误报属于预期**，
+> 原因和验证方式写在 `BUILD.md` 第 5 节。
 
 ---
 
