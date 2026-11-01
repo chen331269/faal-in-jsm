@@ -197,7 +197,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ## 10. 代码
 
-- `source/JSM-FAAL-src.zip` —— 产出这个二进制时的完整源码（81 文件 / 0.19 MB），解压即可编译
+- `source/JSM-FAAL-src.zip` —— 产出这个二进制时的整个工程源码（130 文件 / 1.17 MB），解压即可编译
 - `patch/changes.diff` —— 同一份改动的补丁形式，便于逐行审阅
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
 

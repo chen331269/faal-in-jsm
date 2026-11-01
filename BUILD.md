@@ -5,8 +5,11 @@
 ## 1. 取源码
 
 **最省事的方式：直接用 [`source/JSM-FAAL-src.zip`](source/JSM-FAAL-src.zip)。**
-这是产出 `dist/` 里那个二进制时的**完整源码**（81 个文件 / 0.19 MB），
+这是产出 dist/ 里那个二进制时的**整个工程源码**（130 个文件 / 1.17 MB，压缩后），
 解压即可编译，不需要打补丁、也不依赖任何分支状态。
+
+包含 JoyShockMapper/（含 src/win32/FakerInputBackend.cpp）、cmake/、dist/、script/ 与根文件；
+已排除 .vs/、out/（构建缓存，约 2 GB）、JSM_GUI/（Tauri 外壳）与 docs/（截图）。
 
 ```bash
 unzip source/JSM-FAAL-src.zip -d .
