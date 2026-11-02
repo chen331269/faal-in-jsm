@@ -1,0 +1,27 @@
+# 路径二：直通转发（PS_MOTION）
+# 用于「游戏本身就支持原生陀螺仪」的情况——JSM 把物理陀螺仪转发给虚拟手柄，
+# 由游戏自己读。FAAL 只能站在游戏的空间转换之前，因此这里有两种子模式：
+#
+#   FAAL_PSMOTION_MODE = 1  PLAYER：游戏内部会做玩家空间转换（多数原生 FPS，例：使命召唤）
+#   FAAL_PSMOTION_MODE = 2  LOCAL ：游戏只读本地轴、完全不做转换（例：战地）
+#
+# 先按 1 试；如果手感发飘、上下和左右的抑制明显不对称，再换成 2。
+# 用 2 时若左右没反应，把 FAAL_LOCAL_TURN_AXIS 改成 1（游戏用翻滚轴转向）。
+
+GYRO_OUTPUT = PS_MOTION
+FAAL_PSMOTION_MODE = 1
+# FAAL_LOCAL_TURN_AXIS = 0        # 仅 LOCAL 模式用：0 = Y(偏航)  1 = Z(翻滚)
+
+# ---- FAAL 参数（与鼠标模式共用同一套）----
+FAAL_HYST_RISE_TIME = 0.0029
+FAAL_HYST_FALL_TIME = 0.065
+FAAL_PEAK_DECAY_TIME = 0.065
+FAAL_FREEZE_DURATION_SEC = 0.024
+FAAL_SIGN_CHANGE_THR = 0.5
+FAAL_ENABLE_VECTOR_REVERSAL = 1
+FAAL_DIR_CHANGE_MAG_RATIO = 0.15
+FAAL_DIR_CHANGE_ANGLE_RAD = 1.2
+FAAL_ONE_EURO_FC_MIN = 2.0
+FAAL_ONE_EURO_BETA = 0.0802
+FAAL_DRIFT_HOLD_TIME_SEC = 0.200
+FAAL_SMOOTH_TIME_SEC = 0.0075
