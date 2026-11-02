@@ -150,7 +150,50 @@ JSM 用它而不是 `SendInput`，是因为注入层级不同：
 
 ---
 
-## 7. 直接跑一遍
+## 7. 两条输出路径
+
+JSM 把陀螺仪交给游戏有两条路。**FAAL 在两条路上都能用**，但所处位置不同，可调的项也不同。
+
+### 路径一：鼠标模式
+
+把陀螺仪映射成鼠标，走游戏自己的鼠标输入。**适用于不适配原生陀螺仪的游戏**。
+此时 FAAL 站在空间转换**之后**，拿到的已经是二维意图。
+
+```
+GYRO_OUTPUT = MOUSE
+GYRO_SPACE = PLAYER_TURN      # 其他空间见上游文档
+```
+可调项：12 个 `FAAL_*` 参数。
+示例：[`examples/mouse.txt`](examples/mouse.txt)
+
+### 路径二：直通转发（PS_MOTION）
+
+把物理陀螺仪转发给虚拟手柄，**适用于自带原生陀螺仪的游戏**。
+此时 FAAL 只能站在游戏的空间转换**之前**，于是多了两个设置：
+
+```
+GYRO_OUTPUT = PS_MOTION
+FAAL_PSMOTION_MODE = 1        # 0=直通  1=PLAYER  2=LOCAL
+FAAL_LOCAL_TURN_AXIS = 0      # 仅 LOCAL：0=Y(偏航)  1=Z(翻滚)
+```
+
+| 模式 | 用于 | 我们做的事 |
+|---|---|---|
+| `1` PLAYER | 游戏内部**有**玩家空间转换 | 只缩放它读的输入，转换交给它 |
+| `2` LOCAL | 游戏内部**没有**玩家空间转换 | 我们在转发前替它做一遍转换 |
+
+选择依据是「游戏内部有没有玩家空间」，不是靠试。
+示例：[`examples/ps-motion.txt`](examples/ps-motion.txt)
+
+### 两条路径共用
+
+| 命令 | 作用 |
+|---|---|
+| 12 个 `FAAL_*` 参数 | 同一套滤波器参数，两条路通用 |
+| `FAAL_TRACE_START` / `FAAL_TRACE_STOP` | 逐帧记录 / 写出 `faal_trace.csv` |
+| `FAAL_PSMOTION` / `FAAL_LOCALAXIS` | 临时按顺序切换上面两个设置，不改配置文件 |
+
+### 运行前提
 
 `dist/` 里是编译好的可执行文件（Windows x64 Release），对应本仓库的 patch：
 
@@ -160,29 +203,8 @@ JSM 用它而不是 `SendInput`，是因为注入层级不同：
 | `SDL3.dll` | 手柄输入后端 |
 | `FakerInputDll.dll` | 虚拟输入后端 |
 
-**前提**：FakerInput **驱动**需要单独安装（管理员权限，会创建虚拟 HID 设备）；
-本仓库只带用户态 DLL。二进制未签名，首次运行会被 SmartScreen 拦截。
-
-跑起来之后：
-
-```
-FAAL_PSMOTION_MODE = 2   # 0=直通 1=PLAYER(游戏自己做转换) 2=LOCAL(我们做转换)
-FAAL_LOCAL_TURN_AXIS = 0 # LOCAL 模式下游戏的转向轴：0=Y(偏航) 1=Z(翻滚)
-FAAL_TRACE_START         # 开始记录
-FAAL_TRACE_STOP          # 停止并写出 faal_trace.csv
-```
-
-`FAAL_PSMOTION` / `FAAL_LOCALAXIS` 两条命令仍然保留，作用是按顺序切换上面两个设置，方便临时试。
-
-### 配置示例
-
-[`examples/`](examples/) 里有三份可直接抄的配置：
-
-| 文件 | 适用 |
-|---|---|
-| [`mouse.txt`](examples/mouse.txt) | 鼠标模式，最高兼容性 |
-| [`ps-motion-player.txt`](examples/ps-motion-player.txt) | PS_MOTION + 游戏自己做空间转换（如使命召唤） |
-| [`ps-motion-local.txt`](examples/ps-motion-local.txt) | PS_MOTION + 游戏只读本地轴（如战地） |
+FakerInput **驱动**需要单独安装（管理员权限，会创建虚拟 HID 设备）；本仓库只带用户态 DLL。
+二进制未签名，首次运行会被 SmartScreen 拦截。
 
 > **不想直接运行二进制？** 可以自己编译验证：见 [`BUILD.md`](BUILD.md) 的完整步骤
 > （克隆 `jsm-studio` 分支 → `git apply patch/changes.diff` → CMake 构建），
