@@ -21,6 +21,31 @@ index 0000000..f0b969b
 +//
 +// This file is kept only because CMakeLists.txt still lists it; nothing includes
 +// it. Read initJsmSettings() in main.cpp for the current definitions.
+diff --git a/JoyShockMapper/include/JoyShockMapper.h b/JoyShockMapper/include/JoyShockMapper.h
+index 48065c1..8666f1e 100644
+--- a/JoyShockMapper/include/JoyShockMapper.h
++++ b/JoyShockMapper/include/JoyShockMapper.h
+@@ -268,6 +268,20 @@ enum class SettingID
+ 	RETURN_DEADZONE_ANGLE_CUTOFF,
+ 	TELEMETRY_ENABLED,
+ 	TELEMETRY_PORT,
++	FAAL_HYST_RISE_TIME,
++	FAAL_HYST_FALL_TIME, // 原 FAAL_HYST_FALL_SLOW_TIME 改名
++	FAAL_PEAK_DECAY_TIME,
++	FAAL_FREEZE_DURATION_SEC,
++	FAAL_DRIFT_HOLD_TIME_SEC,
++	FAAL_SIGN_CHANGE_THR,
++	FAAL_ONE_EURO_FC_MIN,
++	FAAL_ONE_EURO_BETA,
++	FAAL_DIR_CHANGE_MAG_RATIO,
++	FAAL_DIR_CHANGE_ANGLE_RAD,
++	FAAL_ENABLE_VECTOR_REVERSAL,
++	FAAL_SMOOTH_TIME_SEC,
++	FAAL_PSMOTION_MODE,     // 0 = OFF, 1 = PLAYER, 2 = LOCAL
++	FAAL_LOCAL_TURN_AXIS,   // 0 = local Y (yaw), 1 = local Z (roll)
+ };
+ 
+ // constexpr are like #define but with respect to typeness
 diff --git a/JoyShockMapper/include/faal_filter.h b/JoyShockMapper/include/faal_filter.h
 new file mode 100644
 index 0000000..e402067
@@ -618,7 +643,7 @@ index 0000000..b36c052
 +}
 \ No newline at end of file
 diff --git a/JoyShockMapper/src/main.cpp b/JoyShockMapper/src/main.cpp
-index 48d1fce..1a66f82 100644
+index 48d1fce..e955ba5 100644
 --- a/JoyShockMapper/src/main.cpp
 +++ b/JoyShockMapper/src/main.cpp
 @@ -24,6 +24,8 @@
@@ -630,7 +655,7 @@ index 48d1fce..1a66f82 100644
  
  #ifdef _WIN32
  #include <shellapi.h>
-@@ -437,6 +439,45 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
+@@ -437,6 +439,65 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
  	jsl->SetTriggerEffect(jc->_handle, jc->_leftEffect, jc->_rightEffect);
  }
  
@@ -643,7 +668,16 @@ index 48d1fce..1a66f82 100644
 +// delivered pitch is linear in X, so multiplying (Y,Z) by s scales the game's yaw
 +// by exactly s, and multiplying X by s_p scales its pitch by exactly s_p — without
 +// having to replicate the game's math.
-+static bool g_faalPsMotion = true;
++// Three modes (FAAL_PSMOTION_MODE):
++//   0 OFF    — pass the calibrated gyro through untouched
++//   1 PLAYER — the game does its own player-space transform, so we only scale its input
++//   2 LOCAL  — the game reads local axes with no transform, so we run it for them
++
++static int faalSettingAsInt(SettingID id, int fallback)
++{
++	auto s = SettingsManager::get<float>(id);
++	return s ? (int)(s->value() + 0.5f) : fallback;
++}
 +
 +static void faalPlayerSpace2D(float rx, float ry, float rz, float gx, float gy, float gz,
 +  float &outYaw, float &outPitch)
@@ -665,18 +699,29 @@ index 48d1fce..1a66f82 100644
 +
 +bool do_FAAL_PSMOTION()
 +{
-+	g_faalPsMotion = !g_faalPsMotion;
-+	if (g_faalPsMotion)
-+		COUT << "FAAL PS_MOTION pre-filter ON (player space, per-axis)\n";
-+	else
-+		COUT << "FAAL PS_MOTION pre-filter OFF (calibrated gyro passed through)\n";
++	int mode = (faalSettingAsInt(SettingID::FAAL_PSMOTION_MODE, 1) + 1) % 3;
++	if (auto s = SettingsManager::get<float>(SettingID::FAAL_PSMOTION_MODE)) s->set((float)mode);
++	static const char *names[] = {
++		"OFF (calibrated gyro passed through)",
++		"PLAYER (game does the transform; we scale its input)",
++		"LOCAL (we transform + filter, the game reads local axes)"
++	};
++	COUT << "FAAL PS_MOTION: " << names[mode] << '\n';
++	return true;
++}
++
++bool do_FAAL_LOCALAXIS()
++{
++	int axis = 1 - faalSettingAsInt(SettingID::FAAL_LOCAL_TURN_AXIS, 0);
++	if (auto s = SettingsManager::get<float>(SettingID::FAAL_LOCAL_TURN_AXIS)) s->set((float)axis);
++	COUT << "FAAL local turn axis: " << (axis ? "Z (roll)" : "Y (yaw)") << '\n';
 +	return true;
 +}
 +
  void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
  {
  
-@@ -470,18 +511,119 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -470,18 +531,133 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	}
  	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
  
@@ -765,9 +810,8 @@ index 48d1fce..1a66f82 100644
 +
 +	if (isDirectOutput)
 +	{
-+		// Filter in the space the game will use (PLAYER_TURN), then fold the result
-+		// back into the 3D vector the game receives. Each axis keeps its own
-+		// suppression, and the gravity-referenced rotation axis is not rotated.
++		// Run the player-space transform ourselves, filter those two scalars, then hand
++		// the result back in the form the game actually consumes.
 +		float psYaw, psPitch;
 +		faalPlayerSpace2D(inGyroX, inGyroY, inGyroZ, inGravX, inGravY, inGravZ, psYaw, psPitch);
 +		const float origYaw = psYaw;
@@ -775,8 +819,13 @@ index 48d1fce..1a66f82 100644
 +
 +		faal_filter(psYaw, psPitch, deltaTime);
 +
-+		if (g_faalPsMotion)
++		const int psMode = (int)(jc->getSetting(SettingID::FAAL_PSMOTION_MODE) + 0.5f);
++		const int turnAxis = (int)(jc->getSetting(SettingID::FAAL_LOCAL_TURN_AXIS) + 0.5f);
++
++		if (psMode == 1)
 +		{
++			// Player-space game: it will transform our input itself, so scale the axes it
++			// reads. Multiplying (Y,Z) by s scales its yaw by s, X by s_p scales its pitch.
 +			float sYaw = (fabsf(origYaw) > 1e-3f) ? psYaw / origYaw : 1.f;
 +			float sPitch = (fabsf(origPitch) > 1e-3f) ? psPitch / origPitch : 1.f;
 +			sYaw = std::clamp(sYaw, 0.f, 1.f);
@@ -784,6 +833,16 @@ index 48d1fce..1a66f82 100644
 +			directGyroX = inGyroX * sPitch;
 +			directGyroY = inGyroY * sYaw;
 +			directGyroZ = inGyroZ * sYaw;
++		}
++		else if (psMode == 2)
++		{
++			// Local-space game: it reads the axes raw, so write the transformed and
++			// filtered values straight into them — we are doing the space transform for it.
++			directGyroX = -psPitch;
++			if (turnAxis == 0)
++				directGyroY = psYaw;
++			else
++				directGyroZ = psYaw;
 +		}
 +
 +		// Recorded after the fact so out_* is literally what the game receives.
@@ -797,7 +856,7 @@ index 48d1fce..1a66f82 100644
  	// Quat reverseRotation = Quat(cosf(angle * 0.5f), normAxis.x, normAxis.y, normAxis.z);
  	// reverseRotation.Normalize();
  	// jc->_lastGrav *= reverseRotation;
-@@ -539,36 +681,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -539,36 +715,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		int mouse_x_flag = (int)jc->getSetting<GyroAxisMask>(SettingID::MOUSE_X_FROM_GYRO_AXIS);
  		if ((mouse_x_flag & (int)GyroAxisMask::X) > 0)
  		{
@@ -843,7 +902,7 @@ index 48d1fce..1a66f82 100644
  	}
  	else
  	{
-@@ -593,12 +735,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -593,12 +769,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  			if (gyroSpace == GyroSpace::PLAYER_TURN)
  			{
  				// grav dot gyro axis (but only Y (yaw) and Z (roll))
@@ -858,7 +917,7 @@ index 48d1fce..1a66f82 100644
  			}
  			else // PLAYER_LEAN
  			{
-@@ -627,23 +769,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -627,23 +803,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisY *= lengthReciprocal;
  						rollAxisZ *= lengthReciprocal;
  
@@ -886,7 +945,7 @@ index 48d1fce..1a66f82 100644
  			// project local pitch axis (X) onto gravity plane
  			// super simple since our point is only non-zero in one axis
  			float gravDotPitchAxis = normGravX;
-@@ -661,7 +803,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -661,7 +837,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  				pitchAxisZ *= lengthReciprocal;
  
  				// get global pitch factor (dot)
@@ -895,7 +954,7 @@ index 48d1fce..1a66f82 100644
  				// by the way, pinch it towards the nonsense limit
  				gyroY *= sideReduction;
  
-@@ -683,7 +825,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -683,7 +859,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisZ *= lengthReciprocal;
  
  						// get global roll factor (dot)
@@ -904,7 +963,7 @@ index 48d1fce..1a66f82 100644
  						// by the way, pinch because we rely on a good pitch vector here
  						gyroX *= sideReduction;
  					}
-@@ -697,6 +839,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -697,6 +873,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		}
  	}
  	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -920,7 +979,7 @@ index 48d1fce..1a66f82 100644
  	// do gyro smoothing
  	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
  	if (useDecaySmoothing)
-@@ -1597,7 +1748,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1597,7 +1782,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
  	}
  
@@ -929,7 +988,7 @@ index 48d1fce..1a66f82 100644
  	if (!jc->processed_gyro_stick)
  	{
  		if (gyroOutput == GyroOutput::LEFT_STICK)
-@@ -1612,7 +1763,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1612,7 +1797,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		{
  			if (jc->hasVirtualController())
  			{
@@ -938,7 +997,7 @@ index 48d1fce..1a66f82 100644
  			}
  		}
  	}
-@@ -1646,6 +1797,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1646,6 +1831,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  
  void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
  {
@@ -946,7 +1005,7 @@ index 48d1fce..1a66f82 100644
  	handle_to_joyshock.clear();
  	this_thread::sleep_for(100ms);
  	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
-@@ -1774,6 +1926,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
+@@ -1774,6 +1960,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -954,7 +1013,7 @@ index 48d1fce..1a66f82 100644
  	g_gyroGlobalOffCount.store(0);
  	g_gyroGlobalOnCount.store(0);
  	g_hasGyroOnAllBinding.store(false);
-@@ -1846,6 +1999,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
+@@ -1846,6 +2033,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
  	 
  	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
  	jsl->DisconnectAndDisposeAll();
@@ -962,7 +1021,7 @@ index 48d1fce..1a66f82 100644
  	connectDevices(mergeJoycons, selectedDeviceIds);
  	jsl->SetCallback(&joyShockPollCallback);
  	jsl->SetTouchCallback(&touchCallback);
-@@ -1887,6 +2041,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
+@@ -1887,6 +2075,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
  	return true;
  }
  
@@ -1001,7 +1060,7 @@ index 48d1fce..1a66f82 100644
  bool do_ONE_EURO_FILTER()
  {
  	COUT << "One Euro Filter enabled for gyro\n";
-@@ -1895,6 +2081,7 @@ bool do_ONE_EURO_FILTER()
+@@ -1895,6 +2115,7 @@ bool do_ONE_EURO_FILTER()
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -1009,7 +1068,7 @@ index 48d1fce..1a66f82 100644
  	return true;
  }
  
-@@ -3472,6 +3659,62 @@ void initJsmSettings(CmdRegistry *commandRegistry)
+@@ -3472,6 +3693,76 @@ void initJsmSettings(CmdRegistry *commandRegistry)
  	commandRegistry->add((new JSMAssignment<float>(*return_deadzone_cutoff_angle))
  	    ->setHelp("In HYBRID_AIM stick mode, angle to the center in which the return deadzone is fully active.\n"\
  			      "Valid values range from 0 to 90"));
@@ -1069,10 +1128,24 @@ index 48d1fce..1a66f82 100644
 +	auto faalSmoothTimeSec = new JSMSetting<float>(SettingID::FAAL_SMOOTH_TIME_SEC, 0.1f);
 +	SettingsManager::add(faalSmoothTimeSec);
 +	commandRegistry->add(new JSMAssignment<float>("FAAL_SMOOTH_TIME_SEC", *faalSmoothTimeSec));
++
++	// PS_MOTION preprocessing mode: 0 = OFF, 1 = PLAYER (the game transforms), 2 = LOCAL (we do)
++	auto faalPsMode = new JSMSetting<float>(SettingID::FAAL_PSMOTION_MODE, 1.f);
++	faalPsMode->setFilter([](float c, float n) { return std::clamp(n, 0.f, 2.f); });
++	SettingsManager::add(faalPsMode);
++	commandRegistry->add((new JSMAssignment<float>("FAAL_PSMOTION_MODE", *faalPsMode))
++	    ->setHelp("PS_MOTION 预处理模式：0=直通 1=PLAYER（游戏自己做空间转换，我们只缩放）2=LOCAL（我们做转换+滤波，游戏读本地轴）。"));
++
++	// Which local axis the game uses as its turn axis in LOCAL mode: 0 = Y (yaw), 1 = Z (roll)
++	auto faalTurnAxis = new JSMSetting<float>(SettingID::FAAL_LOCAL_TURN_AXIS, 0.f);
++	faalTurnAxis->setFilter([](float c, float n) { return std::clamp(n, 0.f, 1.f); });
++	SettingsManager::add(faalTurnAxis);
++	commandRegistry->add((new JSMAssignment<float>("FAAL_LOCAL_TURN_AXIS", *faalTurnAxis))
++	    ->setHelp("LOCAL 模式下游戏当作转向轴的本地轴：0=Y（偏航）1=Z（翻滚）。"));
  		
  
  }
-@@ -3586,6 +3829,14 @@ int main(int argc, char *argv[])
+@@ -3586,6 +3877,16 @@ int main(int argc, char *argv[])
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "LSR", mappings[(int)ButtonID::LSR], true));
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "RSR", mappings[(int)ButtonID::RSR], true));
  
@@ -1081,6 +1154,8 @@ index 48d1fce..1a66f82 100644
 +	    ->setHelp("开始记录 FAAL 每帧输入（容量约 20 万帧，1000Hz 下约 200 秒）。"));
 +	commandRegistry.add((new JSMMacro("FAAL_TRACE_STOP"))->SetMacro(bind(&do_FAAL_TRACE_STOP))
 +	    ->setHelp("停止记录，并把 faal_trace.csv 写入 JSM 配置目录。"));
++	commandRegistry.add((new JSMMacro("FAAL_LOCALAXIS"))->SetMacro(bind(&do_FAAL_LOCALAXIS))
++	    ->setHelp("切换 LOCAL 模式下被游戏当作转向轴的本地轴：Y(偏航) 或 Z(翻滚)。"));
 +	commandRegistry.add((new JSMMacro("FAAL_PSMOTION"))->SetMacro(bind(&do_FAAL_PSMOTION))
 +	    ->setHelp("切换 PS_MOTION 的预处理：ON 时在玩家空间分轴抑制后再转发给虚拟手柄，OFF 时直接转发标定后的陀螺仪（用于 A/B 对比手感）。"));
 +

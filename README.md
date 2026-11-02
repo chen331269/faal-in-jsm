@@ -166,10 +166,23 @@ JSM 用它而不是 `SendInput`，是因为注入层级不同：
 跑起来之后：
 
 ```
-FAAL_PSMOTION        # 切换预处理开关，A/B 对比手感
-FAAL_TRACE_START     # 开始记录
-FAAL_TRACE_STOP      # 停止并写出 faal_trace.csv
+FAAL_PSMOTION_MODE = 2   # 0=直通 1=PLAYER(游戏自己做转换) 2=LOCAL(我们做转换)
+FAAL_LOCAL_TURN_AXIS = 0 # LOCAL 模式下游戏的转向轴：0=Y(偏航) 1=Z(翻滚)
+FAAL_TRACE_START         # 开始记录
+FAAL_TRACE_STOP          # 停止并写出 faal_trace.csv
 ```
+
+`FAAL_PSMOTION` / `FAAL_LOCALAXIS` 两条命令仍然保留，作用是按顺序切换上面两个设置，方便临时试。
+
+### 配置示例
+
+[`examples/`](examples/) 里有三份可直接抄的配置：
+
+| 文件 | 适用 |
+|---|---|
+| [`mouse.txt`](examples/mouse.txt) | 鼠标模式，最高兼容性 |
+| [`ps-motion-player.txt`](examples/ps-motion-player.txt) | PS_MOTION + 游戏自己做空间转换（如使命召唤） |
+| [`ps-motion-local.txt`](examples/ps-motion-local.txt) | PS_MOTION + 游戏只读本地轴（如战地） |
 
 > **不想直接运行二进制？** 可以自己编译验证：见 [`BUILD.md`](BUILD.md) 的完整步骤
 > （克隆 `jsm-studio` 分支 → `git apply patch/changes.diff` → CMake 构建），
