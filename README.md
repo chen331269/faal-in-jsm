@@ -189,9 +189,27 @@ FAAL_LOCAL_TURN_AXIS = 0      # 仅 LOCAL：0=Y(偏航)  1=Z(翻滚)
 
 | 命令 | 作用 |
 |---|---|
-| 12 个 `FAAL_*` 参数 | 同一套滤波器参数，两条路通用 |
+| 13 个 `FAAL_*` 参数 | 同一套滤波器参数，两条路通用 |
+| `FAAL_SMOOTH_THRESHOLD` | 平滑与抑制的交接速度（deg/s）。低于它只平滑、不抑制；0 = 不平滑 |
 | `FAAL_TRACE_START` / `FAAL_TRACE_STOP` | 逐帧记录 / 写出 `faal_trace.csv` |
 | `FAAL_PSMOTION` / `FAAL_LOCALAXIS` | 临时按顺序切换上面两个设置，不改配置文件 |
+| `FAAL_STICKSMOOTH` | 转发右摇杆前的三样本平滑（默认关） |
+
+### 平滑与抑制的分工
+
+FAAL 里这两件事是分开的，`FAAL_SMOOTH_THRESHOLD` 是它们的交接点：
+
+| 速度 | 谁在管 | 效果 |
+|---|---|---|
+| < 阈值 | 一欧元低通 | 只平滑，不判断 |
+| > 2× 阈值 | 抑制状态机 | 斜率 / 过零 / 反转全力 |
+
+原因很实际：低速段的逐帧变化（~0.13°/s）和手抖幅度（0.1~0.3°/s）在统计上重叠，**那一区间根本分不出"意图"和"抖动"**。与其用靠不住的判据去猜，不如交给低通。
+
+完整的流程、分层平滑的实现细节、以及每个参数的职责见 FAAL-Filter 仓库：
+
+- [处理流程](https://github.com/chen331269/FAAL-Filter/blob/main/docs/pipeline.md)
+- [平滑的三层结构](https://github.com/chen331269/FAAL-Filter/blob/main/docs/smoothing.md)
 
 ### 运行前提
 

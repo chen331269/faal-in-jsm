@@ -22,10 +22,10 @@ index 0000000..f0b969b
 +// This file is kept only because CMakeLists.txt still lists it; nothing includes
 +// it. Read initJsmSettings() in main.cpp for the current definitions.
 diff --git a/JoyShockMapper/include/JoyShockMapper.h b/JoyShockMapper/include/JoyShockMapper.h
-index 48065c1..8666f1e 100644
+index 48065c1..7f4caf3 100644
 --- a/JoyShockMapper/include/JoyShockMapper.h
 +++ b/JoyShockMapper/include/JoyShockMapper.h
-@@ -268,6 +268,20 @@ enum class SettingID
+@@ -268,6 +268,21 @@ enum class SettingID
  	RETURN_DEADZONE_ANGLE_CUTOFF,
  	TELEMETRY_ENABLED,
  	TELEMETRY_PORT,
@@ -43,15 +43,16 @@ index 48065c1..8666f1e 100644
 +	FAAL_SMOOTH_TIME_SEC,
 +	FAAL_PSMOTION_MODE,     // 0 = OFF, 1 = PLAYER, 2 = LOCAL
 +	FAAL_LOCAL_TURN_AXIS,   // 0 = local Y (yaw), 1 = local Z (roll)
++	FAAL_SMOOTH_THRESHOLD,  // deg/s above which nothing is smoothed (0 = off)
  };
  
  // constexpr are like #define but with respect to typeness
 diff --git a/JoyShockMapper/include/faal_filter.h b/JoyShockMapper/include/faal_filter.h
 new file mode 100644
-index 0000000..e402067
+index 0000000..2091004
 --- /dev/null
 +++ b/JoyShockMapper/include/faal_filter.h
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,147 @@
 +#pragma once
 +
 +// ============================================================================
@@ -115,6 +116,9 @@ index 0000000..e402067
 +	// Only fc_min and beta. Derivative passthrough (alpha_d = 1).
 +	float oneEuroFcMin = 2.0f;
 +	float oneEuroBeta = 0.08f;
++	// Soft-tiered smoothing: above this speed (deg/s) nothing is smoothed at all.
++	// 0 = no smoothing at all (One Euro bypassed). Large value = everything smoothed.
++	float smoothThreshold = 0.0f;
 +
 +	// ---- Vector reversal detection --------------------------------------
 +	float enableVectorReversal = 0.0f;
@@ -197,6 +201,107 @@ index 0000000..e402067
 +void FaalTraceRecord(const FaalTraceInput& in, const FaalParams& applied);
 +unsigned long long FaalTraceStopAndWrite(const char* path);
 \ No newline at end of file
+diff --git a/JoyShockMapper/src/JoyShock.cpp b/JoyShockMapper/src/JoyShock.cpp
+index 6c63fba..a056c0d 100644
+--- a/JoyShockMapper/src/JoyShock.cpp
++++ b/JoyShockMapper/src/JoyShock.cpp
+@@ -1593,11 +1593,96 @@ void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, short movX, sho
+ 	ts._prevDown = down;
+ }
+ 
++// ---------------------------------------------------------------------------
++// Light three-sample smoothing for the forwarded stick, for games that read the
++// raw stick and implement flick stick themselves without any filtering.
++//
++// Deliberately simple: the filter advances once per *new stick sample*, not once
++// per tick. The controller reports at ~250 Hz while this runs at 1 kHz, so a
++// per-tick filter would apply four times per sample and behave four times harder
++// than intended. Between samples the output is held.
++//
++// The three directions are averaged as unit vectors, which handles the wrap at
++// +/-180 degrees correctly and leaves the deflection untouched.
++// ---------------------------------------------------------------------------
++static float s_filtX[3] = { 1.f, 1.f, 1.f };
++static float s_filtY[3] = { 0.f, 0.f, 0.f };
++static int s_filtCount = 0;
++static float s_filtLastX = -999.f, s_filtLastY = -999.f;
++static float s_filtAngle = 0.f;
++static bool s_filtValid = false;
++bool g_smoothNativeFlickStick = false; // opt-in: per-game behaviour, off by default
++
++static void smoothNativeFlickStick(float &stickX, float &stickY, float dt)
++{
++	float len = sqrtf(stickX * stickX + stickY * stickY);
++	if (len < 0.05f)
++	{
++		s_filtValid = false;
++		s_filtCount = 0;
++		return;
++	}
++
++	// Only advance on a genuinely new reading.
++	bool newSample = (stickX != s_filtLastX) || (stickY != s_filtLastY);
++	if (newSample)
++	{
++		s_filtLastX = stickX;
++		s_filtLastY = stickY;
++
++		float ux = stickX / len;
++		float uy = stickY / len;
++		if (!s_filtValid)
++		{
++			s_filtX[0] = s_filtX[1] = s_filtX[2] = ux;
++			s_filtY[0] = s_filtY[1] = s_filtY[2] = uy;
++			s_filtCount = 0;
++			s_filtValid = true;
++		}
++		else
++		{
++			s_filtX[2] = s_filtX[1];
++			s_filtY[2] = s_filtY[1];
++			s_filtX[1] = s_filtX[0];
++			s_filtY[1] = s_filtY[0];
++			s_filtX[0] = ux;
++			s_filtY[0] = uy;
++			if (s_filtCount < 2)
++				s_filtCount++;
++		}
++
++		// Circular mean of the available samples.
++		int n = s_filtCount + 1;
++		float sx = 0.f, sy = 0.f;
++		for (int i = 0; i < n; i++)
++		{
++			sx += s_filtX[i];
++			sy += s_filtY[i];
++		}
++		if (fabsf(sx) + fabsf(sy) > 1e-6f)
++			s_filtAngle = atan2f(sy, sx);
++	}
++
++	if (!s_filtValid)
++		return;
++
++	stickX = len * cosf(s_filtAngle);
++	stickY = len * sinf(s_filtAngle);
++}
++
+ bool JoyShock::processGyroStick(float stickX, float stickY, float stickLength, StickMode stickMode, bool forceOutput)
+ 
+ {
+ 	GyroOutput gyroOutput = getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
+ 	bool isLeft = stickMode == StickMode::LEFT_STICK;
++
++	// Pre-filter the physical stick before the game gets to differentiate it.
++	if (!isLeft && g_smoothNativeFlickStick && stickMode == StickMode::RIGHT_STICK)
++	{
++		float tick = SettingsManager::get<float>(SettingID::TICK_TIME)->value() * 0.001f;
++		if (tick > 0.f)
++			smoothNativeFlickStick(stickX, stickY, tick);
++	}
+ 	bool gyroMatchesStickMode = (gyroOutput == GyroOutput::LEFT_STICK && stickMode == StickMode::LEFT_STICK) || (gyroOutput == GyroOutput::RIGHT_STICK && stickMode == StickMode::RIGHT_STICK) || stickMode == StickMode::INVALID;
+ 
+ 	float undeadzoneInner, undeadzoneOuter, unpower, virtualScale;
 diff --git a/JoyShockMapper/src/SettingsManager.cpp b/JoyShockMapper/src/SettingsManager.cpp
 index c68f04d..290fc6a 100644
 --- a/JoyShockMapper/src/SettingsManager.cpp
@@ -211,10 +316,10 @@ index c68f04d..290fc6a 100644
  	static constexpr auto callReset = [](SettingsMap::value_type &kvPair)
 diff --git a/JoyShockMapper/src/faal_filter.cpp b/JoyShockMapper/src/faal_filter.cpp
 new file mode 100644
-index 0000000..b36c052
+index 0000000..fe325e6
 --- /dev/null
 +++ b/JoyShockMapper/src/faal_filter.cpp
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,491 @@
 +#include "faal_filter.h"
 +#include <math.h>
 +#include <stdio.h>
@@ -276,10 +381,47 @@ index 0000000..b36c052
 +	return x_out;
 +}
 +
++// Same filter, but the cutoff is decided by the caller. The tier split needs the
++// speed of the *whole* vector, so the per-axis function must not work it out from
++// its own input — two axes with different cutoffs would rotate the vector.
++static float oneEuroWithCutoff(float x, float dt, float fc, float& x_prev)
++{
++	float tau = 1.0f / (2.0f * 3.14159265f * fc + 0.00001f);
++	float alpha = 1.0f / (1.0f + tau / dt);
++	float x_out = alpha * x + (1.0f - alpha) * x_prev;
++	x_prev = x_out;
++	return x_out;
++}
++
 +// ---------------------------------------------------------------------------
 +//  Per-axis processing
 +// ---------------------------------------------------------------------------
-+static float doFilter(AxisState& st, float v, float dt, bool forceSuppress)
++
++// 0 below e0, 1 above e1, smooth in between.
++static float smoothstepf(float e0, float e1, float x)
++{
++	if (e1 <= e0)
++		return (x >= e1) ? 1.0f : 0.0f;
++	float t = (x - e0) / (e1 - e0);
++	t = faal_clamp(t, 0.0f, 1.0f);
++	return t * t * (3.0f - 2.0f * t);
++}
++// Tier weight for the soft-tiered split: 0 = fully smoothed, 1 = fully direct.
++// Derived from the whole vector's speed so both axes split identically.
++static float smoothTierWeight(float speed)
++{
++	float top = g_params.smoothThreshold;
++	if (top <= 0.0f)
++		return 1.0f; // threshold 0 means "no smoothing at all": everything direct
++	float bottom = top * 0.5f;
++	if (speed <= bottom)
++		return 0.0f;
++	if (speed >= top)
++		return 1.0f;
++	return (speed - bottom) / (top - bottom);
++}
++static float doFilter(AxisState& st, float v, float dt, bool forceSuppress,
++  float tierWeight, float vectorSpeed)
 +{
 +	float absV = faal_abs(v);
 +
@@ -365,6 +507,17 @@ index 0000000..b36c052
 +		st.suppressHyst = 1.0f;
 +	}
 +
++	// ---- 8b) Hand-off gate ----------------------------------------------
++	// Below the smoothing threshold the signal cannot tell intent from tremor, so
++	// suppression stays out of it and the low-pass does the work. Above it, the
++	// suppression takes over. Tied to smoothThreshold so there is one hand-over point.
++	if (g_params.smoothThreshold > 0.0f)
++	{
++		float gate = smoothstepf(g_params.smoothThreshold,
++		  2.0f * g_params.smoothThreshold, vectorSpeed);
++		rawSuppress *= gate;
++	}
++
 +	// ---- 9) Hysteresis (self-adaptive fall) -----------------------------
 +	if (rawSuppress > st.suppressHyst)
 +	{
@@ -380,12 +533,16 @@ index 0000000..b36c052
 +
 +	st.prevAbsV = absV;
 +
-+	// ---- 10) One Euro smoothing -----------------------------------------
-+	float out = oneEuroFilter(v, dt,
-+	  g_params.oneEuroFcMin,
-+	  g_params.oneEuroBeta,
-+	  st.oneEuroPrev,
-+	  st.oneEuroDeriv);
++	// ---- 10) Tiered One Euro smoothing ----------------------------------
++	// The input is split by magnitude, not the output blended: whatever goes into
++	// the filter is eventually consumed, so total displacement is preserved and a
++	// big movement never loads up the filter's state. Above the threshold the
++	// weight is 1 and the filter is fed zero, which lets it drain.
++	float directPart = v * tierWeight;
++	float smoothed = oneEuroWithCutoff(v * (1.0f - tierWeight), dt,
++	  g_params.oneEuroFcMin + g_params.oneEuroBeta * vectorSpeed,
++	  st.oneEuroPrev);
++	float out = directPart + smoothed;
 +
 +	// ---- 11) Apply suppression ------------------------------------------
 +	out *= (1.0f - st.suppressHyst);
@@ -451,8 +608,6 @@ index 0000000..b36c052
 +	}
 +
 +	float alpha = 1.0f - expf(-dt / g_params.smoothTimeSec);
-+	s_smoothDirX += alpha * (outX - s_smoothDirX);
-+	s_smoothDirY += alpha * (outY - s_smoothDirY);
 +
 +	bool forceSuppress = false;
 +	if (g_params.enableVectorReversal > 0.5f)
@@ -473,8 +628,17 @@ index 0000000..b36c052
 +		}
 +	}
 +
-+	outX = doFilter(s_faal_stateX, outX, dt, forceSuppress);
-+	outY = doFilter(s_faal_stateY, outY, dt, forceSuppress);
++	// Compare first, then absorb: updating the reference before the comparison pulls
++	// it towards the current direction and under-reads the turn by (1 - alpha).
++	s_smoothDirX += alpha * (outX - s_smoothDirX);
++	s_smoothDirY += alpha * (outY - s_smoothDirY);
++
++	{
++		float speed2 = sqrtf(outX * outX + outY * outY);
++		float w = smoothTierWeight(speed2);
++		outX = doFilter(s_faal_stateX, outX, dt, forceSuppress, w, speed2);
++		outY = doFilter(s_faal_stateY, outY, dt, forceSuppress, w, speed2);
++	}
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -494,17 +658,23 @@ index 0000000..b36c052
 +	}
 +
 +	float alpha = 1.0f - expf(-dt / g_params.smoothTimeSec);
-+	s_smoothDirX += alpha * (outX - s_smoothDirX);
-+	s_smoothDirY += alpha * (outY - s_smoothDirY);
-+	s_smoothDirZ += alpha * (outZ - s_smoothDirZ);
 +
 +	bool forceSuppress = checkVectorReversal3D(
 +	  outX, outY, outZ,
 +	  s_smoothDirX, s_smoothDirY, s_smoothDirZ);
 +
-+	outX = doFilter(s_faal_stateX, outX, dt, forceSuppress);
-+	outY = doFilter(s_faal_stateY, outY, dt, forceSuppress);
-+	outZ = doFilter(s_faal_stateZ, outZ, dt, forceSuppress);
++	// Compare first, then absorb (see the two-axis entry point).
++	s_smoothDirX += alpha * (outX - s_smoothDirX);
++	s_smoothDirY += alpha * (outY - s_smoothDirY);
++	s_smoothDirZ += alpha * (outZ - s_smoothDirZ);
++
++	{
++		float speed3 = sqrtf(outX * outX + outY * outY + outZ * outZ);
++		float w = smoothTierWeight(speed3);
++		outX = doFilter(s_faal_stateX, outX, dt, forceSuppress, w, speed3);
++		outY = doFilter(s_faal_stateY, outY, dt, forceSuppress, w, speed3);
++		outZ = doFilter(s_faal_stateZ, outZ, dt, forceSuppress, w, speed3);
++	}
 +}
 +
 +void ResetFaalFilter()
@@ -643,7 +813,7 @@ index 0000000..b36c052
 +}
 \ No newline at end of file
 diff --git a/JoyShockMapper/src/main.cpp b/JoyShockMapper/src/main.cpp
-index 48d1fce..e955ba5 100644
+index 48d1fce..60003c5 100644
 --- a/JoyShockMapper/src/main.cpp
 +++ b/JoyShockMapper/src/main.cpp
 @@ -24,6 +24,8 @@
@@ -655,7 +825,7 @@ index 48d1fce..e955ba5 100644
  
  #ifdef _WIN32
  #include <shellapi.h>
-@@ -437,6 +439,65 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
+@@ -437,6 +439,74 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
  	jsl->SetTriggerEffect(jc->_handle, jc->_leftEffect, jc->_rightEffect);
  }
  
@@ -710,6 +880,15 @@ index 48d1fce..e955ba5 100644
 +	return true;
 +}
 +
++extern bool g_smoothNativeFlickStick;
++
++bool do_FAAL_STICKSMOOTH()
++{
++	g_smoothNativeFlickStick = !g_smoothNativeFlickStick;
++	COUT << "FAAL native flick-stick smoothing: " << (g_smoothNativeFlickStick ? "ON" : "OFF") << '\n';
++	return true;
++}
++
 +bool do_FAAL_LOCALAXIS()
 +{
 +	int axis = 1 - faalSettingAsInt(SettingID::FAAL_LOCAL_TURN_AXIS, 0);
@@ -721,7 +900,7 @@ index 48d1fce..e955ba5 100644
  void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
  {
  
-@@ -470,18 +531,133 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -470,18 +540,145 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	}
  	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
  
@@ -744,6 +923,7 @@ index 48d1fce..e955ba5 100644
 +		p.signChangeThr = jc->getSetting(SettingID::FAAL_SIGN_CHANGE_THR);
 +		p.oneEuroFcMin = jc->getSetting(SettingID::FAAL_ONE_EURO_FC_MIN);
 +		p.oneEuroBeta = jc->getSetting(SettingID::FAAL_ONE_EURO_BETA);
++		p.smoothThreshold = jc->getSetting(SettingID::FAAL_SMOOTH_THRESHOLD);
 +		p.enableVectorReversal = jc->getSetting(SettingID::FAAL_ENABLE_VECTOR_REVERSAL);
 +		p.dirChangeMagRatio = jc->getSetting(SettingID::FAAL_DIR_CHANGE_MAG_RATIO);
 +		p.dirChangeAngleRad = jc->getSetting(SettingID::FAAL_DIR_CHANGE_ANGLE_RAD);
@@ -810,17 +990,18 @@ index 48d1fce..e955ba5 100644
 +
 +	if (isDirectOutput)
 +	{
-+		// Run the player-space transform ourselves, filter those two scalars, then hand
-+		// the result back in the form the game actually consumes.
++		const int psMode = (int)(jc->getSetting(SettingID::FAAL_PSMOTION_MODE) + 0.5f);
++		const int turnAxis = (int)(jc->getSetting(SettingID::FAAL_LOCAL_TURN_AXIS) + 0.5f);
++
++		// Both modes start from the gravity-referenced pair: we want the player-space
++		// quantity no matter what the game does later. PLAYER lets the game apply its own
++		// transform on top; LOCAL writes our transformed result into the fixed axes it reads.
 +		float psYaw, psPitch;
 +		faalPlayerSpace2D(inGyroX, inGyroY, inGyroZ, inGravX, inGravY, inGravZ, psYaw, psPitch);
 +		const float origYaw = psYaw;
 +		const float origPitch = psPitch;
 +
 +		faal_filter(psYaw, psPitch, deltaTime);
-+
-+		const int psMode = (int)(jc->getSetting(SettingID::FAAL_PSMOTION_MODE) + 0.5f);
-+		const int turnAxis = (int)(jc->getSetting(SettingID::FAAL_LOCAL_TURN_AXIS) + 0.5f);
 +
 +		if (psMode == 1)
 +		{
@@ -836,13 +1017,23 @@ index 48d1fce..e955ba5 100644
 +		}
 +		else if (psMode == 2)
 +		{
-+			// Local-space game: it reads the axes raw, so write the transformed and
-+			// filtered values straight into them — we are doing the space transform for it.
++			// Local-space game: it reads fixed axes with no transform of its own, so we hand
++			// it a fully rewritten vector — pitch on X, the gravity-referenced turn on the
++			// chosen axis, and nothing on the remaining one. Leaving the third axis at its
++			// raw local value would leak untransformed roll straight into the game.
 +			directGyroX = -psPitch;
++			// JSM's own yaw convention is mirrored relative to what a game expects
++			// (the flick path negates its angle change for the same reason), so flip it.
 +			if (turnAxis == 0)
-+				directGyroY = psYaw;
++			{
++				directGyroY = -psYaw;
++				directGyroZ = 0.f;
++			}
 +			else
-+				directGyroZ = psYaw;
++			{
++				directGyroZ = -psYaw;
++				directGyroY = 0.f;
++			}
 +		}
 +
 +		// Recorded after the fact so out_* is literally what the game receives.
@@ -856,7 +1047,7 @@ index 48d1fce..e955ba5 100644
  	// Quat reverseRotation = Quat(cosf(angle * 0.5f), normAxis.x, normAxis.y, normAxis.z);
  	// reverseRotation.Normalize();
  	// jc->_lastGrav *= reverseRotation;
-@@ -539,36 +715,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -539,36 +736,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		int mouse_x_flag = (int)jc->getSetting<GyroAxisMask>(SettingID::MOUSE_X_FROM_GYRO_AXIS);
  		if ((mouse_x_flag & (int)GyroAxisMask::X) > 0)
  		{
@@ -902,7 +1093,7 @@ index 48d1fce..e955ba5 100644
  	}
  	else
  	{
-@@ -593,12 +769,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -593,12 +790,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  			if (gyroSpace == GyroSpace::PLAYER_TURN)
  			{
  				// grav dot gyro axis (but only Y (yaw) and Z (roll))
@@ -917,7 +1108,7 @@ index 48d1fce..e955ba5 100644
  			}
  			else // PLAYER_LEAN
  			{
-@@ -627,23 +803,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -627,23 +824,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisY *= lengthReciprocal;
  						rollAxisZ *= lengthReciprocal;
  
@@ -945,7 +1136,7 @@ index 48d1fce..e955ba5 100644
  			// project local pitch axis (X) onto gravity plane
  			// super simple since our point is only non-zero in one axis
  			float gravDotPitchAxis = normGravX;
-@@ -661,7 +837,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -661,7 +858,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  				pitchAxisZ *= lengthReciprocal;
  
  				// get global pitch factor (dot)
@@ -954,7 +1145,7 @@ index 48d1fce..e955ba5 100644
  				// by the way, pinch it towards the nonsense limit
  				gyroY *= sideReduction;
  
-@@ -683,7 +859,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -683,7 +880,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisZ *= lengthReciprocal;
  
  						// get global roll factor (dot)
@@ -963,7 +1154,7 @@ index 48d1fce..e955ba5 100644
  						// by the way, pinch because we rely on a good pitch vector here
  						gyroX *= sideReduction;
  					}
-@@ -697,6 +873,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -697,6 +894,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		}
  	}
  	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -979,7 +1170,7 @@ index 48d1fce..e955ba5 100644
  	// do gyro smoothing
  	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
  	if (useDecaySmoothing)
-@@ -1597,7 +1782,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1597,7 +1803,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
  	}
  
@@ -988,7 +1179,7 @@ index 48d1fce..e955ba5 100644
  	if (!jc->processed_gyro_stick)
  	{
  		if (gyroOutput == GyroOutput::LEFT_STICK)
-@@ -1612,7 +1797,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1612,7 +1818,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		{
  			if (jc->hasVirtualController())
  			{
@@ -997,7 +1188,7 @@ index 48d1fce..e955ba5 100644
  			}
  		}
  	}
-@@ -1646,6 +1831,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1646,6 +1852,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  
  void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
  {
@@ -1005,7 +1196,7 @@ index 48d1fce..e955ba5 100644
  	handle_to_joyshock.clear();
  	this_thread::sleep_for(100ms);
  	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
-@@ -1774,6 +1960,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
+@@ -1774,6 +1981,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -1013,7 +1204,7 @@ index 48d1fce..e955ba5 100644
  	g_gyroGlobalOffCount.store(0);
  	g_gyroGlobalOnCount.store(0);
  	g_hasGyroOnAllBinding.store(false);
-@@ -1846,6 +2033,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
+@@ -1846,6 +2054,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
  	 
  	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
  	jsl->DisconnectAndDisposeAll();
@@ -1021,7 +1212,7 @@ index 48d1fce..e955ba5 100644
  	connectDevices(mergeJoycons, selectedDeviceIds);
  	jsl->SetCallback(&joyShockPollCallback);
  	jsl->SetTouchCallback(&touchCallback);
-@@ -1887,6 +2075,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
+@@ -1887,6 +2096,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
  	return true;
  }
  
@@ -1060,7 +1251,7 @@ index 48d1fce..e955ba5 100644
  bool do_ONE_EURO_FILTER()
  {
  	COUT << "One Euro Filter enabled for gyro\n";
-@@ -1895,6 +2115,7 @@ bool do_ONE_EURO_FILTER()
+@@ -1895,6 +2136,7 @@ bool do_ONE_EURO_FILTER()
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -1068,7 +1259,7 @@ index 48d1fce..e955ba5 100644
  	return true;
  }
  
-@@ -3472,6 +3693,76 @@ void initJsmSettings(CmdRegistry *commandRegistry)
+@@ -3472,6 +3714,84 @@ void initJsmSettings(CmdRegistry *commandRegistry)
  	commandRegistry->add((new JSMAssignment<float>(*return_deadzone_cutoff_angle))
  	    ->setHelp("In HYBRID_AIM stick mode, angle to the center in which the return deadzone is fully active.\n"\
  			      "Valid values range from 0 to 90"));
@@ -1113,6 +1304,14 @@ index 48d1fce..e955ba5 100644
 +	SettingsManager::add(faalOneEuroBeta);
 +	commandRegistry->add(new JSMAssignment<float>("FAAL_ONE_EURO_BETA", *faalOneEuroBeta));
 +
++	// Soft-tiered smoothing: above this speed (deg/s) nothing is smoothed at all.
++	// 0 = One Euro bypassed entirely (suppression only).
++	auto faalSmoothThreshold = new JSMSetting<float>(SettingID::FAAL_SMOOTH_THRESHOLD, 0.f);
++	faalSmoothThreshold->setFilter([](float c, float n) { return std::clamp(n, 0.f, 2000.f); });
++	SettingsManager::add(faalSmoothThreshold);
++	commandRegistry->add((new JSMAssignment<float>("FAAL_SMOOTH_THRESHOLD", *faalSmoothThreshold))
++	    ->setHelp("分层平滑阈值（deg/s）：超过这个速度完全不平滑。0 = 完全关闭一欧元（只保留抑制），设一个很大的值 = 全程平滑。"));
++
 +	auto faalDirChangeMagRatio = new JSMSetting<float>(SettingID::FAAL_DIR_CHANGE_MAG_RATIO, 0.3f);
 +	SettingsManager::add(faalDirChangeMagRatio);
 +	commandRegistry->add(new JSMAssignment<float>("FAAL_DIR_CHANGE_MAG_RATIO", *faalDirChangeMagRatio));
@@ -1145,7 +1344,7 @@ index 48d1fce..e955ba5 100644
  		
  
  }
-@@ -3586,6 +3877,16 @@ int main(int argc, char *argv[])
+@@ -3586,6 +3906,18 @@ int main(int argc, char *argv[])
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "LSR", mappings[(int)ButtonID::LSR], true));
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "RSR", mappings[(int)ButtonID::RSR], true));
  
@@ -1154,6 +1353,8 @@ index 48d1fce..e955ba5 100644
 +	    ->setHelp("开始记录 FAAL 每帧输入（容量约 20 万帧，1000Hz 下约 200 秒）。"));
 +	commandRegistry.add((new JSMMacro("FAAL_TRACE_STOP"))->SetMacro(bind(&do_FAAL_TRACE_STOP))
 +	    ->setHelp("停止记录，并把 faal_trace.csv 写入 JSM 配置目录。"));
++	commandRegistry.add((new JSMMacro("FAAL_STICKSMOOTH"))->SetMacro(bind(&do_FAAL_STICKSMOOTH))
++	    ->setHelp("原生 flick stick 平滑开关：在把物理右摇杆转发给虚拟手柄之前，按 Jibb 的自适应窗口平滑转角变化。"));
 +	commandRegistry.add((new JSMMacro("FAAL_LOCALAXIS"))->SetMacro(bind(&do_FAAL_LOCALAXIS))
 +	    ->setHelp("切换 LOCAL 模式下被游戏当作转向轴的本地轴：Y(偏航) 或 Z(翻滚)。"));
 +	commandRegistry.add((new JSMMacro("FAAL_PSMOTION"))->SetMacro(bind(&do_FAAL_PSMOTION))
