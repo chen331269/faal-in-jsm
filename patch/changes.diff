@@ -316,10 +316,10 @@ index c68f04d..290fc6a 100644
  	static constexpr auto callReset = [](SettingsMap::value_type &kvPair)
 diff --git a/JoyShockMapper/src/faal_filter.cpp b/JoyShockMapper/src/faal_filter.cpp
 new file mode 100644
-index 0000000..fe325e6
+index 0000000..04ec305
 --- /dev/null
 +++ b/JoyShockMapper/src/faal_filter.cpp
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,473 @@
 +#include "faal_filter.h"
 +#include <math.h>
 +#include <stdio.h>
@@ -397,15 +397,6 @@ index 0000000..fe325e6
 +//  Per-axis processing
 +// ---------------------------------------------------------------------------
 +
-+// 0 below e0, 1 above e1, smooth in between.
-+static float smoothstepf(float e0, float e1, float x)
-+{
-+	if (e1 <= e0)
-+		return (x >= e1) ? 1.0f : 0.0f;
-+	float t = (x - e0) / (e1 - e0);
-+	t = faal_clamp(t, 0.0f, 1.0f);
-+	return t * t * (3.0f - 2.0f * t);
-+}
 +// Tier weight for the soft-tiered split: 0 = fully smoothed, 1 = fully direct.
 +// Derived from the whole vector's speed so both axes split identically.
 +static float smoothTierWeight(float speed)
@@ -507,16 +498,7 @@ index 0000000..fe325e6
 +		st.suppressHyst = 1.0f;
 +	}
 +
-+	// ---- 8b) Hand-off gate ----------------------------------------------
-+	// Below the smoothing threshold the signal cannot tell intent from tremor, so
-+	// suppression stays out of it and the low-pass does the work. Above it, the
-+	// suppression takes over. Tied to smoothThreshold so there is one hand-over point.
-+	if (g_params.smoothThreshold > 0.0f)
-+	{
-+		float gate = smoothstepf(g_params.smoothThreshold,
-+		  2.0f * g_params.smoothThreshold, vectorSpeed);
-+		rawSuppress *= gate;
-+	}
++
 +
 +	// ---- 9) Hysteresis (self-adaptive fall) -----------------------------
 +	if (rawSuppress > st.suppressHyst)
