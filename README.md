@@ -189,8 +189,8 @@ FAAL_LOCAL_TURN_AXIS = 0      # 仅 LOCAL：0=Y(偏航)  1=Z(翻滚)
 
 | 命令 | 作用 |
 |---|---|
-| 13 个 `FAAL_*` 参数 | 同一套滤波器参数，两条路通用 |
-| `FAAL_SMOOTH_THRESHOLD` | 平滑与抑制的交接速度（deg/s）。低于它只平滑、不抑制；0 = 不平滑 |
+| `FAAL_*` 参数（15 个） | 同一套滤波器参数，两条路通用 |
+| `FAAL_SMOOTH_THRESHOLD` | 平滑的开关与强度（deg/s）。0 = 不平滑；大于 0 时，低于该速度才平滑。**不影响抑制** |
 | `FAAL_TRACE_START` / `FAAL_TRACE_STOP` | 逐帧记录 / 写出 `faal_trace.csv` |
 | `FAAL_PSMOTION` / `FAAL_LOCALAXIS` | 临时按顺序切换上面两个设置，不改配置文件 |
 | `FAAL_STICKSMOOTH` | 转发右摇杆前的三样本平滑（默认关） |
