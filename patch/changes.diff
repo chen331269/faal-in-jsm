@@ -21,11 +21,104 @@ index 0000000..f0b969b
 +//
 +// This file is kept only because CMakeLists.txt still lists it; nothing includes
 +// it. Read initJsmSettings() in main.cpp for the current definitions.
+diff --git a/JoyShockMapper/include/FakerInputBackend.h b/JoyShockMapper/include/FakerInputBackend.h
+new file mode 100644
+index 0000000..20fb41d
+--- /dev/null
++++ b/JoyShockMapper/include/FakerInputBackend.h
+@@ -0,0 +1,86 @@
++#pragma once
++#include <windows.h>
++#include <cstdint>
++
++inline uint8_t vkToButtonBit(int vkKey)
++{
++	switch (vkKey)
++	{
++	case VK_LBUTTON:
++		return 0x01;
++	case VK_RBUTTON:
++		return 0x02;
++	case VK_MBUTTON:
++		return 0x04;
++	case VK_XBUTTON1:
++		return 0x08;
++	case VK_XBUTTON2:
++		return 0x10;
++	default:
++		return 0x00;
++	}
++}
++
++// Report IDs (from driver.h - confirmed by descriptor order)
++#define REPORTID_KEYBOARD 1
++#define REPORTID_ENHANCED_KEY 2
++#define REPORTID_RELATIVE_MOUSE 3
++#define REPORTID_ABSOLUTE_MOUSE 4
++#define REPORTID_CONTROL 64
++#define REPORTID_CHECK_API_VERSION 65
++#define REPORTID_API_VERSION_FEATURE 66
++
++#pragma pack(push, 1)
++struct RelativeMouseReport
++{
++	uint8_t ReportId; // = REPORTID_RELATIVE_MOUSE (3)
++	uint8_t Buttons;  // bit0=L, bit1=R, bit2=M, bit3=X1, bit4=X2, bit5-7=padding
++	int16_t MouseX;   // relative X, -32767 to 32767
++	int16_t MouseY;   // relative Y, -32767 to 32767
++	int8_t Wheel;     // scroll wheel, -127 to 127
++	int8_t AC_Pan;    // horizontal wheel, -127 to 127
++};
++#pragma pack(pop)
++
++static_assert(sizeof(RelativeMouseReport) == 8, "Report size mismatch!");
++
++// Windows virtual-key code to HID usage. Returns 0 when there is no mapping,
++// which lets callers fall back to SendInput instead of dropping the key.
++unsigned char vkToHidUsage(int vk);
++
++class FakerInputBackend
++{
++public:
++	FakerInputBackend();
++	~FakerInputBackend();
++	bool init();
++	void shutdown();
++	void moveRelative(int x, int y);
++	void pressButton(int vkKey, bool pressed);
++	void scroll(int amount);
++	void setButtons(uint8_t buttons);
++	// Keyboard goes through the same virtual HID device, so it never touches
++	// SendInput. The report is only written when something actually changed.
++	void pressKey(int vkKey, bool pressed);
++	bool isKeyboardAvailable() const
++	{
++		return keyboardReady_;
++	}
++	bool isAvailable() const
++	{
++		return hDevice_ != INVALID_HANDLE_VALUE;
++	}
++
++private:
++	HANDLE hDevice_;
++	uint8_t currentButtons_;
++	void sendReport(int x, int y);
++
++	// Keyboard rollover state: modifier bits plus up to six concurrent keys.
++	bool keyboardReady_ = false;
++	uint8_t keyboardModifiers_ = 0;
++	uint8_t keyboardKeys_[6] = { 0, 0, 0, 0, 0, 0 };
++	uint8_t keyboardSentModifiers_ = 0xFF;
++	uint8_t keyboardSentKeys_[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
++	void sendKeyboardReport();
++};
+\ No newline at end of file
 diff --git a/JoyShockMapper/include/JoyShockMapper.h b/JoyShockMapper/include/JoyShockMapper.h
-index 48065c1..7f4caf3 100644
+index 48065c1..be0f969 100644
 --- a/JoyShockMapper/include/JoyShockMapper.h
 +++ b/JoyShockMapper/include/JoyShockMapper.h
-@@ -268,6 +268,21 @@ enum class SettingID
+@@ -268,6 +268,22 @@ enum class SettingID
  	RETURN_DEADZONE_ANGLE_CUTOFF,
  	TELEMETRY_ENABLED,
  	TELEMETRY_PORT,
@@ -44,9 +137,18 @@ index 48065c1..7f4caf3 100644
 +	FAAL_PSMOTION_MODE,     // 0 = OFF, 1 = PLAYER, 2 = LOCAL
 +	FAAL_LOCAL_TURN_AXIS,   // 0 = local Y (yaw), 1 = local Z (roll)
 +	FAAL_SMOOTH_THRESHOLD,  // deg/s above which nothing is smoothed (0 = off)
++	FAAL_ENABLED,           // master switch: 0 bypasses all FAAL processing
  };
  
  // constexpr are like #define but with respect to typeness
+@@ -414,6 +430,7 @@ enum class GyroOutput
+ 	LEFT_STICK,
+ 	RIGHT_STICK,
+ 	PS_MOTION,
++	OFF, // gyro is read and filtered but nothing is emitted: a kill switch
+ 	INVALID
+ };
+ 
 diff --git a/JoyShockMapper/include/faal_filter.h b/JoyShockMapper/include/faal_filter.h
 new file mode 100644
 index 0000000..2091004
@@ -795,7 +897,7 @@ index 0000000..04ec305
 +}
 \ No newline at end of file
 diff --git a/JoyShockMapper/src/main.cpp b/JoyShockMapper/src/main.cpp
-index 48d1fce..60003c5 100644
+index 48d1fce..b2a85e5 100644
 --- a/JoyShockMapper/src/main.cpp
 +++ b/JoyShockMapper/src/main.cpp
 @@ -24,6 +24,8 @@
@@ -882,7 +984,15 @@ index 48d1fce..60003c5 100644
  void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
  {
  
-@@ -470,18 +540,145 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -449,6 +519,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+ 	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
+ 	jc->_timeNow = timeNow;
+ 
++
+ 	if (triggerCalibrationStep)
+ 	{
+ 		calibrateTriggers(jc);
+@@ -470,18 +541,156 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	}
  	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
  
@@ -930,8 +1040,18 @@ index 48d1fce..60003c5 100644
  
 +	float rawGyroX = inGyroX, rawGyroY = inGyroY, rawGyroZ = inGyroZ;
 +
++	const bool faalEnabled = jc->getSetting(SettingID::FAAL_ENABLED) > 0.5f;
++	// Re-enabling starts from a clean filter instead of whatever state it held when
++	// it was switched off, so the first frames after the switch are predictable.
++	static bool s_faalWasEnabled = true;
++	if (faalEnabled && !s_faalWasEnabled)
++		ResetFaalFilter();
++	s_faalWasEnabled = faalEnabled;
++
 +	GyroOutput gyroOutput = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
-+	bool isDirectOutput = (gyroOutput == GyroOutput::PS_MOTION);
++	// OFF emits nothing but still runs the filter, so switching back to
++	// PS_MOTION does not start from a cold filter.
++	bool isDirectOutput = (gyroOutput == GyroOutput::PS_MOTION || gyroOutput == GyroOutput::OFF);
 +
  	float inGravX, inGravY, inGravZ;
  	motion.GetGravity(inGravX, inGravY, inGravZ);
@@ -983,7 +1103,8 @@ index 48d1fce..60003c5 100644
 +		const float origYaw = psYaw;
 +		const float origPitch = psPitch;
 +
-+		faal_filter(psYaw, psPitch, deltaTime);
++		if (faalEnabled)
++			faal_filter(psYaw, psPitch, deltaTime);
 +
 +		if (psMode == 1)
 +		{
@@ -1029,7 +1150,7 @@ index 48d1fce..60003c5 100644
  	// Quat reverseRotation = Quat(cosf(angle * 0.5f), normAxis.x, normAxis.y, normAxis.z);
  	// reverseRotation.Normalize();
  	// jc->_lastGrav *= reverseRotation;
-@@ -539,36 +736,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -539,36 +748,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		int mouse_x_flag = (int)jc->getSetting<GyroAxisMask>(SettingID::MOUSE_X_FROM_GYRO_AXIS);
  		if ((mouse_x_flag & (int)GyroAxisMask::X) > 0)
  		{
@@ -1075,7 +1196,7 @@ index 48d1fce..60003c5 100644
  	}
  	else
  	{
-@@ -593,12 +790,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -593,12 +802,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  			if (gyroSpace == GyroSpace::PLAYER_TURN)
  			{
  				// grav dot gyro axis (but only Y (yaw) and Z (roll))
@@ -1090,7 +1211,7 @@ index 48d1fce..60003c5 100644
  			}
  			else // PLAYER_LEAN
  			{
-@@ -627,23 +824,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -627,23 +836,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisY *= lengthReciprocal;
  						rollAxisZ *= lengthReciprocal;
  
@@ -1118,7 +1239,7 @@ index 48d1fce..60003c5 100644
  			// project local pitch axis (X) onto gravity plane
  			// super simple since our point is only non-zero in one axis
  			float gravDotPitchAxis = normGravX;
-@@ -661,7 +858,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -661,7 +870,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  				pitchAxisZ *= lengthReciprocal;
  
  				// get global pitch factor (dot)
@@ -1127,7 +1248,7 @@ index 48d1fce..60003c5 100644
  				// by the way, pinch it towards the nonsense limit
  				gyroY *= sideReduction;
  
-@@ -683,7 +880,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -683,7 +892,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisZ *= lengthReciprocal;
  
  						// get global roll factor (dot)
@@ -1136,7 +1257,7 @@ index 48d1fce..60003c5 100644
  						// by the way, pinch because we rely on a good pitch vector here
  						gyroX *= sideReduction;
  					}
-@@ -697,6 +894,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -697,6 +906,16 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		}
  	}
  	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -1144,7 +1265,8 @@ index 48d1fce..60003c5 100644
 +	if (!isDirectOutput)
 +	{
 +		const float inX = gyroX, inY = gyroY;
-+		faal_filter(gyroX, gyroY, deltaTime);
++		if (faalEnabled)
++			faal_filter(gyroX, gyroY, deltaTime);
 +		// out_* is what the sensitivity / accel curve actually consumes.
 +		traceInput(inX, inY, 0.f, gyroX, gyroY, 0.f);
 +	}
@@ -1152,7 +1274,7 @@ index 48d1fce..60003c5 100644
  	// do gyro smoothing
  	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
  	if (useDecaySmoothing)
-@@ -1597,7 +1803,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1597,7 +1816,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
  	}
  
@@ -1161,7 +1283,7 @@ index 48d1fce..60003c5 100644
  	if (!jc->processed_gyro_stick)
  	{
  		if (gyroOutput == GyroOutput::LEFT_STICK)
-@@ -1612,7 +1818,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1612,7 +1831,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		{
  			if (jc->hasVirtualController())
  			{
@@ -1170,7 +1292,7 @@ index 48d1fce..60003c5 100644
  			}
  		}
  	}
-@@ -1646,6 +1852,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1646,6 +1865,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  
  void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
  {
@@ -1178,7 +1300,7 @@ index 48d1fce..60003c5 100644
  	handle_to_joyshock.clear();
  	this_thread::sleep_for(100ms);
  	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
-@@ -1774,6 +1981,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
+@@ -1774,6 +1994,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -1186,7 +1308,7 @@ index 48d1fce..60003c5 100644
  	g_gyroGlobalOffCount.store(0);
  	g_gyroGlobalOnCount.store(0);
  	g_hasGyroOnAllBinding.store(false);
-@@ -1846,6 +2054,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
+@@ -1846,6 +2067,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
  	 
  	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
  	jsl->DisconnectAndDisposeAll();
@@ -1194,7 +1316,7 @@ index 48d1fce..60003c5 100644
  	connectDevices(mergeJoycons, selectedDeviceIds);
  	jsl->SetCallback(&joyShockPollCallback);
  	jsl->SetTouchCallback(&touchCallback);
-@@ -1887,6 +2096,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
+@@ -1887,6 +2109,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
  	return true;
  }
  
@@ -1233,7 +1355,7 @@ index 48d1fce..60003c5 100644
  bool do_ONE_EURO_FILTER()
  {
  	COUT << "One Euro Filter enabled for gyro\n";
-@@ -1895,6 +2136,7 @@ bool do_ONE_EURO_FILTER()
+@@ -1895,6 +2149,7 @@ bool do_ONE_EURO_FILTER()
  	{
  		jc->resetOneEuroFilter();
  	}
@@ -1241,7 +1363,7 @@ index 48d1fce..60003c5 100644
  	return true;
  }
  
-@@ -3472,6 +3714,84 @@ void initJsmSettings(CmdRegistry *commandRegistry)
+@@ -3472,6 +3727,91 @@ void initJsmSettings(CmdRegistry *commandRegistry)
  	commandRegistry->add((new JSMAssignment<float>(*return_deadzone_cutoff_angle))
  	    ->setHelp("In HYBRID_AIM stick mode, angle to the center in which the return deadzone is fully active.\n"\
  			      "Valid values range from 0 to 90"));
@@ -1294,6 +1416,13 @@ index 48d1fce..60003c5 100644
 +	commandRegistry->add((new JSMAssignment<float>("FAAL_SMOOTH_THRESHOLD", *faalSmoothThreshold))
 +	    ->setHelp("分层平滑阈值（deg/s）：超过这个速度完全不平滑。0 = 完全关闭一欧元（只保留抑制），设一个很大的值 = 全程平滑。"));
 +
++	// Master switch: 0 bypasses every FAAL stage (no smoothing, no suppression).
++	auto faalEnabled = new JSMSetting<float>(SettingID::FAAL_ENABLED, 1.f);
++	faalEnabled->setFilter([](float c, float n) { return std::clamp(n, 0.f, 1.f); });
++	SettingsManager::add(faalEnabled);
++	commandRegistry->add((new JSMAssignment<float>("FAAL_ENABLED", *faalEnabled))
++	    ->setHelp("FAAL 总开关：0 = 完全旁路（不平滑也不抑制），1 = 正常工作。"));
++
 +	auto faalDirChangeMagRatio = new JSMSetting<float>(SettingID::FAAL_DIR_CHANGE_MAG_RATIO, 0.3f);
 +	SettingsManager::add(faalDirChangeMagRatio);
 +	commandRegistry->add(new JSMAssignment<float>("FAAL_DIR_CHANGE_MAG_RATIO", *faalDirChangeMagRatio));
@@ -1326,7 +1455,7 @@ index 48d1fce..60003c5 100644
  		
  
  }
-@@ -3586,6 +3906,18 @@ int main(int argc, char *argv[])
+@@ -3586,6 +3926,18 @@ int main(int argc, char *argv[])
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "LSR", mappings[(int)ButtonID::LSR], true));
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "RSR", mappings[(int)ButtonID::RSR], true));
  
@@ -1345,3 +1474,614 @@ index 48d1fce..60003c5 100644
  	// Add Macro commands
  	commandRegistry.add((new JSMMacro("RESET_MAPPINGS"))->SetMacro(bind(&do_RESET_MAPPINGS, &commandRegistry))->setHelp("Delete all custom bindings and reset to default,\nand run script OnReset.txt in JSM_DIRECTORY."));
  	commandRegistry.add((new JSMMacro("NO_GYRO_BUTTON"))->SetMacro(bind(&do_NO_GYRO_BUTTON))->setHelp("Enable gyro at all times, without any GYRO_OFF binding."));
+diff --git a/JoyShockMapper/src/win32/FakerInputBackend.cpp b/JoyShockMapper/src/win32/FakerInputBackend.cpp
+new file mode 100644
+index 0000000..e328200
+--- /dev/null
++++ b/JoyShockMapper/src/win32/FakerInputBackend.cpp
+@@ -0,0 +1,298 @@
++#include "FakerInputBackend.h"
++#include <windows.h>
++#include <cstdio>
++
++typedef void* FIC;
++typedef FIC (*PFN_alloc)(void);
++typedef bool (*PFN_connect)(FIC);
++typedef void (*PFN_disconnect)(FIC);
++typedef void (*PFN_free)(FIC);
++typedef void (*PFN_rel)(FIC, unsigned char, short, short, char, char);
++// Signature confirmed from the shipped DLL: rcx = client, dl = modifier byte,
++// r8 = pointer to six HID usage bytes.
++typedef bool (*PFN_kbd)(FIC, unsigned char, unsigned char*);
++
++static HMODULE g_dll = NULL;
++static FIC g_cli = NULL;
++static PFN_rel g_rel = NULL;
++static PFN_kbd g_kbd = NULL;
++static PFN_disconnect g_disc = NULL;
++static PFN_free g_fre = NULL;
++
++// Windows virtual-key code -> HID usage. Returns 0 when unmapped, in which case
++// the caller falls back to SendInput rather than silently dropping the key.
++unsigned char vkToHidUsage(int vk)
++{
++	if (vk >= 'A' && vk <= 'Z')
++		return (unsigned char)(0x04 + (vk - 'A'));
++	if (vk >= '1' && vk <= '9')
++		return (unsigned char)(0x1E + (vk - '1'));
++	if (vk >= VK_F1 && vk <= VK_F12)
++		return (unsigned char)(0x3A + (vk - VK_F1));
++	if (vk >= VK_F13 && vk <= VK_F24)
++		return (unsigned char)(0x68 + (vk - VK_F13));
++	if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
++	{
++		if (vk == VK_NUMPAD0)
++			return 0x62;
++		return (unsigned char)(0x59 + (vk - VK_NUMPAD1));
++	}
++	switch (vk)
++	{
++	case '0': return 0x27;
++	case VK_RETURN: return 0x28;
++	case VK_ESCAPE: return 0x29;
++	case VK_BACK: return 0x2A;
++	case VK_TAB: return 0x2B;
++	case VK_SPACE: return 0x2C;
++	case VK_OEM_MINUS: return 0x2D;
++	case VK_OEM_PLUS: return 0x2E;
++	case VK_OEM_4: return 0x2F;
++	case VK_OEM_6: return 0x30;
++	case VK_OEM_5: return 0x31;
++	case VK_OEM_1: return 0x33;
++	case VK_OEM_7: return 0x34;
++	case VK_OEM_3: return 0x35;
++	case VK_OEM_COMMA: return 0x36;
++	case VK_OEM_PERIOD: return 0x37;
++	case VK_OEM_2: return 0x38;
++	case VK_CAPITAL: return 0x39;
++	case VK_SNAPSHOT: return 0x46;
++	case VK_SCROLL: return 0x47;
++	case VK_PAUSE: return 0x48;
++	case VK_INSERT: return 0x49;
++	case VK_HOME: return 0x4A;
++	case VK_PRIOR: return 0x4B;
++	case VK_DELETE: return 0x4C;
++	case VK_END: return 0x4D;
++	case VK_NEXT: return 0x4E;
++	case VK_RIGHT: return 0x4F;
++	case VK_LEFT: return 0x50;
++	case VK_DOWN: return 0x51;
++	case VK_UP: return 0x52;
++	case VK_NUMLOCK: return 0x53;
++	case VK_DIVIDE: return 0x54;
++	case VK_MULTIPLY: return 0x55;
++	case VK_SUBTRACT: return 0x56;
++	case VK_ADD: return 0x57;
++	case VK_DECIMAL: return 0x63;
++	case VK_LSHIFT: return 0xE1;
++	case VK_RSHIFT: return 0xE5;
++	case VK_SHIFT: return 0xE1;
++	case VK_LCONTROL: return 0xE0;
++	case VK_RCONTROL: return 0xE4;
++	case VK_CONTROL: return 0xE0;
++	case VK_LMENU: return 0xE2;
++	case VK_RMENU: return 0xE6;
++	case VK_MENU: return 0xE2;
++	case VK_LWIN: return 0xE3;
++	case VK_RWIN: return 0xE7;
++	default: return 0;
++	}
++}
++
++FakerInputBackend::FakerInputBackend()
++  : hDevice_(INVALID_HANDLE_VALUE)
++  , currentButtons_(0)
++{
++}
++
++FakerInputBackend::~FakerInputBackend()
++{
++	shutdown();
++}
++
++bool FakerInputBackend::init()
++{
++	if (g_cli)
++	{
++		hDevice_ = (HANDLE)1;
++		return true;
++	}
++
++	g_dll = LoadLibraryW(L"FakerInputDll.dll");
++	if (!g_dll)
++	{
++		fprintf(stderr, "FakerInput: LoadLibrary failed, error=%lu\n", GetLastError());
++		return false;
++	}
++
++	auto alloc = (PFN_alloc)GetProcAddress(g_dll, "fakerinput_alloc");
++	auto conn = (PFN_connect)GetProcAddress(g_dll, "fakerinput_connect");
++	g_disc = (PFN_disconnect)GetProcAddress(g_dll, "fakerinput_disconnect");
++	g_fre = (PFN_free)GetProcAddress(g_dll, "fakerinput_free");
++	g_rel = (PFN_rel)GetProcAddress(g_dll, "fakerinput_update_relative_mouse");
++	g_kbd = (PFN_kbd)GetProcAddress(g_dll, "fakerinput_update_keyboard");
++
++	if (!alloc || !conn || !g_disc || !g_fre || !g_rel)
++	{
++		fprintf(stderr, "FakerInput: Failed to resolve DLL functions\n");
++		FreeLibrary(g_dll);
++		g_dll = NULL;
++		return false;
++	}
++
++	g_cli = alloc();
++	if (!g_cli)
++	{
++		fprintf(stderr, "FakerInput: alloc failed\n");
++		FreeLibrary(g_dll);
++		g_dll = NULL;
++		return false;
++	}
++
++	int result = conn(g_cli);
++	if (result == 0)
++	{
++		fprintf(stderr, "FakerInput: connect failed (returned 0)\n");
++		g_fre(g_cli);
++		g_cli = NULL;
++		FreeLibrary(g_dll);
++		g_dll = NULL;
++		return false;
++	}
++
++	hDevice_ = (HANDLE)1;
++	keyboardReady_ = (g_kbd != NULL);
++	fprintf(stderr, "FakerInput: DLL backend initialized successfully! keyboard=%s\n",
++	  keyboardReady_ ? "yes" : "no");
++	return true;
++}
++
++void FakerInputBackend::shutdown()
++{
++	if (g_cli)
++	{
++		if (g_disc)
++			g_disc(g_cli);
++		if (g_fre)
++			g_fre(g_cli);
++		g_cli = NULL;
++	}
++	if (g_dll)
++	{
++		FreeLibrary(g_dll);
++		g_dll = NULL;
++	}
++	g_rel = NULL;
++	g_kbd = NULL;
++	g_disc = NULL;
++	g_fre = NULL;
++	hDevice_ = INVALID_HANDLE_VALUE;
++	currentButtons_ = 0;
++	keyboardReady_ = false;
++	keyboardSentModifiers_ = 0xFF;
++	for (int i = 0; i < 6; i++)
++		keyboardSentKeys_[i] = 0xFF;
++}
++
++void FakerInputBackend::sendReport(int x, int y)
++{
++	if (g_cli && g_rel)
++	{
++		g_rel(g_cli, (unsigned char)(currentButtons_ & 0x1F),
++		  (short)x, (short)y, 0, 0);
++	}
++}
++
++void FakerInputBackend::moveRelative(int x, int y)
++{
++	sendReport(x, y);
++}
++
++void FakerInputBackend::pressButton(int vkKey, bool pressed)
++{
++	uint8_t bit = vkToButtonBit(vkKey);
++	if (bit == 0)
++		return;
++	if (pressed)
++		currentButtons_ |= bit;
++	else
++		currentButtons_ &= ~bit;
++	sendReport(0, 0);
++}
++
++void FakerInputBackend::scroll(int amount)
++{
++	if (!g_cli || !g_rel)
++		return;
++	char w = (char)(amount > 127 ? 127 : (amount < -127 ? -127 : amount));
++	g_rel(g_cli, (unsigned char)(currentButtons_ & 0x1F), 0, 0, w, 0);
++}
++
++void FakerInputBackend::setButtons(uint8_t buttons)
++{
++	currentButtons_ = buttons & 0x1F;
++	sendReport(0, 0);
++}
++
++// ---------------------------------------------------------------------------
++//  Keyboard
++// ---------------------------------------------------------------------------
++void FakerInputBackend::sendKeyboardReport()
++{
++	if (!keyboardReady_)
++		return;
++
++	bool changed = (keyboardModifiers_ != keyboardSentModifiers_);
++	for (int i = 0; i < 6 && !changed; i++)
++	{
++		if (keyboardKeys_[i] != keyboardSentKeys_[i])
++			changed = true;
++	}
++	if (!changed)
++		return; // the whole point: never write the same state twice
++
++	g_kbd(g_cli, keyboardModifiers_, keyboardKeys_);
++	keyboardSentModifiers_ = keyboardModifiers_;
++	for (int i = 0; i < 6; i++)
++		keyboardSentKeys_[i] = keyboardKeys_[i];
++}
++
++void FakerInputBackend::pressKey(int vkKey, bool pressed)
++{
++	if (!keyboardReady_ || g_cli == NULL)
++		return;
++
++	unsigned char usage = vkToHidUsage(vkKey);
++	if (usage == 0)
++		return;
++
++	if (usage >= 0xE0 && usage <= 0xE7)
++	{
++		unsigned char bit = (unsigned char)(1u << (usage - 0xE0));
++		if (pressed)
++			keyboardModifiers_ |= bit;
++		else
++			keyboardModifiers_ &= (unsigned char)~bit;
++	}
++	else
++	{
++		if (pressed)
++		{
++			for (int i = 0; i < 6; i++)
++			{
++				if (keyboardKeys_[i] == usage)
++					return; // already held
++			}
++			for (int i = 0; i < 6; i++)
++			{
++				if (keyboardKeys_[i] == 0)
++				{
++					keyboardKeys_[i] = usage;
++					break;
++				}
++			}
++		}
++		else
++		{
++			for (int i = 0; i < 6; i++)
++			{
++				if (keyboardKeys_[i] == usage)
++					keyboardKeys_[i] = 0;
++			}
++		}
++	}
++
++	sendKeyboardReport();
++}
+\ No newline at end of file
+diff --git a/JoyShockMapper/src/win32/InputHelpers.cpp b/JoyShockMapper/src/win32/InputHelpers.cpp
+index 208159a..e11750d 100644
+--- a/JoyShockMapper/src/win32/InputHelpers.cpp
++++ b/JoyShockMapper/src/win32/InputHelpers.cpp
+@@ -1,8 +1,13 @@
+ #include "InputHelpers.h"
+ #include <thread>
+-
+ #include <unordered_map>
+ 
++// ↓ FakerInput support
++#include "FakerInputBackend.h"
++
++class FakerInputBackend;
++FakerInputBackend& getFakerBackend();
++
+ static float accumulatedX = 0;
+ static float accumulatedY = 0;
+ 
+@@ -58,7 +63,34 @@ unordered_map<WORD, tuple<DWORD, DWORD, DWORD>> mouseMaps = {
+ // send mouse button
+ int pressMouse(KeyCode vkKey, bool isPressed)
+ {
+-	// https://docs.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput
++	// ↓ FakerInput path: try virtual HID first
++	static FakerInputBackend& faker = getFakerBackend();
++	if (faker.isAvailable())
++	{
++		// Wheel handling
++		if (vkKey.code == V_WHEEL_UP)
++		{
++			if (isPressed)
++				faker.scroll(WHEEL_DELTA);
++			return 1;
++		}
++		if (vkKey.code == V_WHEEL_DOWN)
++		{
++			if (isPressed)
++				faker.scroll(-WHEEL_DELTA);
++			return 1;
++		}
++		// Button handling
++		int bit = vkToButtonBit(vkKey.code);
++		if (bit >= 0)
++		{
++			faker.pressButton(bit, isPressed);
++			return 1;
++		}
++		// Unrecognized VK falls through to SendInput
++	}
++
++	// ↓ Original SendInput path (unchanged)
+ 	auto val = mouseMaps[vkKey.code];
+ 
+ 	INPUT input;
+@@ -71,43 +103,22 @@ int pressMouse(KeyCode vkKey, bool isPressed)
+ 	if (input.mi.dwFlags)
+ 	{ // Ignore if there's no event ID (ex: "wheel release")
+ 		auto result = SendInput(1, &input, sizeof(input));
+-		//COUT << key.name << '\n';
+-		//COUT << key.key << '\n';
+ 		return result;
+ 	}
+ 	return 0;
+ }
+ 
+-//// send mouse button
+-//int pressMouse(KeyCode key, bool isPressed)
+-//{
+-//	INPUT input;
+-//	input.type = INPUT_MOUSE;
+-//	if (key == VK_LBUTTON)
+-//	{
+-//		input.mi.dwFlags = isPressed ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+-//	}
+-//	else {
+-//		input.mi.dwFlags = isPressed ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+-//	}
+-//	input.mi.mouseData = 0;
+-//	input.mi.time = 0;
+-//	input.mi.dx = 0;
+-//	input.mi.dy = 0;
+-//	return SendInput(1, &input, sizeof(input));
+-//}
+-
+ bool isNumLockKey(KeyCode key)
+ {
+-	static array<uint8_t, 7> keys { VK_DECIMAL, VK_HOME, VK_END, VK_INSERT, VK_DELETE, VK_PRIOR, VK_NEXT};
++	static array<uint8_t, 7> keys{ VK_DECIMAL, VK_HOME, VK_END, VK_INSERT, VK_DELETE, VK_PRIOR, VK_NEXT };
+ 	return (key.code >= VK_NUMPAD0 && key.code <= VK_NUMPAD9) || find(keys.begin(), keys.end(), key.code) != keys.end();
+ }
+ 
+ bool isExtendedKey(KeyCode key)
+ {
+ 	return ((key.code >= VK_PRIOR && key.code <= VK_HELP) && key.code != VK_SNAPSHOT) ||
+-		(key.code >= VK_LWIN && key.code <= VK_DIVIDE) ||
+-		(key.code >= VK_BROWSER_BACK && key.code <= VK_LAUNCH_APP2);
++	  (key.code >= VK_LWIN && key.code <= VK_DIVIDE) ||
++	  (key.code >= VK_BROWSER_BACK && key.code <= VK_LAUNCH_APP2);
+ }
+ 
+ // send key press
+@@ -118,6 +129,18 @@ int pressKey(KeyCode vkKey, bool pressed)
+ 	if (vkKey.code <= V_WHEEL_DOWN) // Highest mouse ID
+ 		return pressMouse(vkKey, pressed);
+ 
++	// ↓ FakerInput path: send the key through the virtual HID device so the game
++	// sees hardware input instead of an injected SendInput event. Falls back when
++	// the DLL or the driver is unavailable, or when the key has no HID mapping.
++	{
++		static FakerInputBackend &faker = getFakerBackend();
++		if (faker.isKeyboardAvailable() && vkToHidUsage(vkKey.code) != 0)
++		{
++			faker.pressKey(vkKey.code, pressed);
++			return 1;
++		}
++	}
++
+ 	INPUT input;
+ 	memset(&input, 0, sizeof(INPUT));
+ 	input.type = INPUT_KEYBOARD;
+@@ -145,6 +168,21 @@ int pressKey(KeyCode vkKey, bool pressed)
+ 
+ void moveMouse(float x, float y)
+ {
++	// ↓ FakerInput path: try virtual HID first
++	static FakerInputBackend& faker = getFakerBackend();
++	if (faker.isAvailable())
++	{
++		accumulatedX += x;
++		accumulatedY += y;
++		int applicableX = (int)accumulatedX;
++		int applicableY = (int)accumulatedY;
++		accumulatedX -= applicableX;
++		accumulatedY -= applicableY;
++		faker.moveRelative((short)applicableX, (short)applicableY);
++		return;
++	}
++
++	// ↓ Original SendInput path (unchanged)
+ 	accumulatedX += x;
+ 	accumulatedY += y;
+ 
+@@ -153,7 +191,6 @@ void moveMouse(float x, float y)
+ 
+ 	accumulatedX -= applicableX;
+ 	accumulatedY -= applicableY;
+-	//COUT << setprecision(4) << accumulatedX << ' ' << accumulatedY << '\n';
+ 
+ 	INPUT input;
+ 	input.type = INPUT_MOUSE;
+@@ -210,7 +247,7 @@ BOOL WriteToConsole(string_view command)
+ 	// Open the console input buffer directly so this works even when stdin has been
+ 	// redirected to a pipe (e.g. when launched as a child process by the GUI).
+ 	HANDLE hConIn = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE,
+-	    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
++	  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+ 	if (hConIn == INVALID_HANDLE_VALUE)
+ 	{
+ 		hConIn = GetStdHandle(STD_INPUT_HANDLE); // fallback for consoleless environments
+@@ -249,11 +286,27 @@ void initConsole()
+ {
+ 	AllocConsole();
+ 	SetConsoleTitle(L"JoyShockMapper");
++	// Sources are compiled with /utf-8, so narrow string literals are UTF-8 bytes.
++	// Without matching the console code page, any non-ASCII text (the FAAL help
++	// strings) renders as mojibake on a non-UTF-8 system.
++	SetConsoleOutputCP(CP_UTF8);
++	SetConsoleCP(CP_UTF8);
+ 	// https://stackoverflow.com/a/15547699/1130520
+-	freopen_s((FILE **)stdin, "conin$", "r", stdin);
+-	freopen_s((FILE **)stdout, "conout$", "w", stdout);
+-	freopen_s((FILE **)stderr, "conout$", "w", stderr);
++	freopen_s((FILE**)stdin, "conin$", "r", stdin);
++	freopen_s((FILE**)stdout, "conout$", "w", stdout);
++	freopen_s((FILE**)stderr, "conout$", "w", stderr);
+ 	SetConsoleCtrlHandler(&ConsoleCtrlHandler, TRUE);
++
++	// ↓ FakerInput initialization
++	getFakerBackend().init();
++	if (getFakerBackend().isAvailable())
++	{
++		COUT << "FakerInput backend initialized successfully!\n";
++	}
++	else
++	{
++		COUT << "FakerInput init FAILED - falling back to SendInput\n";
++	}
+ }
+ 
+ tuple<string, string> GetActiveWindowName()
+@@ -263,7 +316,7 @@ tuple<string, string> GetActiveWindowName()
+ 	{
+ 		string module(256, '\0');
+ 		string title(256, '\0');
+-		GetWindowTextA(activeWindow, &title[0], title.size()); //note: C++11 only
++		GetWindowTextA(activeWindow, &title[0], title.size()); // note: C++11 only
+ 		title.resize(strlen(title.c_str()));
+ 		DWORD pid;
+ 		// https://stackoverflow.com/questions/14745320/get-active-processname-in-vc
+@@ -295,15 +348,10 @@ vector<string> ListDirectory(string directory)
+ {
+ 	vector<string> fileListing;
+ 
+-	// Prepare string for use with FindFile functions.  First, copy the
+-	// string to a buffer, then append '\*' to the directory name.
+-
+ 	if (directory[directory.size() - 1] != '\\')
+ 		directory.append("\\");
+ 	directory.append("*");
+ 
+-	// Find the first file in the directory.
+-
+ 	WIN32_FIND_DATAA ffd;
+ 	auto hFind = FindFirstFileA(directory.c_str(), &ffd);
+ 
+@@ -312,16 +360,11 @@ vector<string> ListDirectory(string directory)
+ 		return {};
+ 	}
+ 
+-	// List all the files in the directory with some info about them.
+-
+ 	do
+ 	{
+-		// Ignore directories
+ 		if ((ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+-
+ 		{
+ 			fileListing.push_back(ffd.cFileName);
+-			//COUT << "File: " << ffd.cFileName << '\n';
+ 		}
+ 	} while (FindNextFileA(hFind, &ffd) != 0);
+ 
+@@ -350,22 +393,9 @@ bool SetCWD(string_view newCWD)
+ 
+ DWORD ShowOnlineHelp()
+ {
+-	COUT << "See the latest user manual at the web page below:\n" \
+-	     "https://github.com/Electronicks/JoyShockMapper/blob/master/README.md\n";
++	COUT << "See the latest user manual at the web page below:\n"
++	        "https://github.com/Electronicks/JoyShockMapper/blob/master/README.md\n";
+ 	return 0;
+-	// SECURE CODING! https://www.oreilly.com/library/view/secure-programming-cookbook/0596003943/ch01s08.html
+-	//STARTUPINFOA startupInfo;
+-	//PROCESS_INFORMATION procInfo;
+-	//memset(&startupInfo, 0, sizeof(STARTUPINFOA));
+-	//memset(&procInfo, 0, sizeof(PROCESS_INFORMATION));
+-	//auto success = CreateProcessA(NULL, R"(cmd /C "start https://github.com/JibbSmart/JoyShockMapper/blob/master/README.md")", NULL, NULL, FALSE, NORMAL_PRIORITY_CLASS, NULL, NULL, &startupInfo, &procInfo);
+-	//if (success == TRUE)
+-	//{
+-	//	CloseHandle(procInfo.hProcess);
+-	//	CloseHandle(procInfo.hThread);
+-	//	return 0;
+-	//}
+-	//return GetLastError();
+ }
+ 
+ void HideConsole()
+@@ -405,38 +435,36 @@ bool ClearConsole()
+ 
+ 	hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
+ 
+-	// Fetch existing console mode so we correctly add a flag and not turn off others
+ 	DWORD mode = 0;
+ 	if (!GetConsoleMode(hStdout, &mode))
+ 	{
+ 		return false;
+ 	}
+ 
+-	// Hold original mode to restore on exit to be cooperative with other command-line apps.
+ 	const DWORD originalMode = mode;
+ 	mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+ 
+-	// Try to set the mode.
+ 	if (!SetConsoleMode(hStdout, mode))
+ 	{
+ 		return false;
+ 	}
+ 
+-	// Write the sequence for clearing the display.
+ 	DWORD written = 0;
+-	constexpr PCWSTR sequence = L"\x1b[2J\x1b[0;0H"; // Clear screen and move cursor to 0,0
++	constexpr PCWSTR sequence = L"\x1b[2J\x1b[0;0H";
+ 	if (!WriteConsoleW(hStdout, sequence, lstrlen(sequence), &written, NULL))
+ 	{
+-		// If we fail, try to restore the mode on the way out.
+ 		SetConsoleMode(hStdout, originalMode);
+ 		return false;
+ 	}
+ 
+-	// To also clear the scroll back, emit L"\x1b[3J" as well.
+-	// 2J only clears the visible window and 3J only clears the scroll back.
+-
+-	// Restore the mode on the way out to be nice to other command-line applications.
+ 	SetConsoleMode(hStdout, originalMode);
+ 
+ 	return true;
+ }
++
++// ↓ FakerInput backend accessor (definition at end of file, declared at top)
++FakerInputBackend& getFakerBackend()
++{
++	static FakerInputBackend instance;
++	return instance;
++}
+\ No newline at end of file
