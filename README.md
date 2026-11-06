@@ -269,6 +269,7 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 ## 10. 代码
 
 - `source/JSM-FAAL-src.zip` —— 产出这个二进制时的整个工程源码（130 文件 / 1.17 MB），解压即可编译
+- [`docs/keyboard-injection.md`](docs/keyboard-injection.md) —— 键盘为什么从 SendInput 改到虚拟 HID，哪些键仍在旧通道
 - `patch/changes.diff` —— 同一份改动的补丁形式，便于逐行审阅
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
 
