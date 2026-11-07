@@ -278,10 +278,17 @@ FAAL_PSMOTION                          # 预处理开关，A/B 盲测
 
 ## 10. 代码
 
-- `source/JSM-FAAL-src.zip` —— 产出这个二进制时的整个工程源码（130 文件 / 1.17 MB），解压即可编译
+- `source/JSM-FAAL-src.zip` —— 产出这个二进制时的整个工程源码（完整工程源码），解压即可编译
 - [`docs/keyboard-injection.md`](docs/keyboard-injection.md) —— 键盘为什么从 SendInput 改到虚拟 HID，哪些键仍在旧通道
 - `patch/changes.diff` —— 同一份改动的补丁形式，便于逐行审阅
 - `docs/` —— 设计说明、两条路径的结构、线程审计、改动理由
+
+**滤波器本体是单头文件**：`JoyShockMapper/include/faal.h`（C99，声明 + 实现，stb 风格）。
+JSM 里只有一个文件定义 `FAAL_IMPLEMENTATION`，其余只取声明。`src/faal_filter.cpp`
+现在只负责逐帧 CSV 录制，文件名保留是因为 CMakeLists 已经写死了它。
+
+这意味着同一份算法可以直接拿到别的项目里用：定义 `FAAL_IMPLEMENTATION` 后包含
+`faal.h`，或者编成 DLL 给 Python / C# / Rust 调用。
 
 ---
 

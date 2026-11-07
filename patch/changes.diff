@@ -1,3 +1,89 @@
+diff --git a/JoyShockMapper/CMakeLists.txt b/JoyShockMapper/CMakeLists.txt
+index 8fb4bb5..e21eb1b 100644
+--- a/JoyShockMapper/CMakeLists.txt
++++ b/JoyShockMapper/CMakeLists.txt
+@@ -65,7 +65,7 @@ add_executable (
+     include/QuadraticCurve.h
+     include/SigmoidCurve.h
+     include/JumpCurve.h
+-)
++ "src/faal_filter.cpp" "include/faal_filter.h" "include/FAALAssignments.h" "include/FAALSettings.h" "include/FakerInputBackend.h" "src/win32/FakerInputBackend.cpp")
+ 
+ if (WINDOWS)
+ 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${BINARY_NAME})
+@@ -75,7 +75,7 @@ if (WINDOWS)
+         target_sources (
+                 ${BINARY_NAME} PRIVATE
+                 src/SDLWrapper.cpp
+-        )
++         "src/faal_filter.cpp" "include/faal_filter.h" "include/FAALAssignments.h" "include/FAALSettings.h" "include/FakerInputBackend.h" "src/win32/FakerInputBackend.cpp")
+         add_definitions(-DSDL)
+     else()
+         target_sources (
+@@ -93,7 +93,7 @@ if (WINDOWS)
+         src/win32/HidHideApi.cpp             include/HidHideApi.h
+         src/win32/HidHideWhitelister.cpp
+         "Win32 Dialog.rc"                    include/win32/resource.h
+-    )
++     "src/faal_filter.cpp" "include/faal_filter.h" "include/FAALAssignments.h" "include/FAALSettings.h" "include/FakerInputBackend.h" "src/win32/FakerInputBackend.cpp")
+ 
+     # ViGEmClient
+     CPMAddPackage (
+@@ -133,14 +133,13 @@ if (WINDOWS)
+         )
+     endif()
+ 	
+-    set_target_properties (
+-        ${BINARY_NAME} PROPERTIES
+-         WIN32_EXECUTABLE ON
+-         VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)/$(Configuration)/"
+-         VS_DEBUGGER_COMMAND_ARGUMENTS "$(SolutionDir)../dist"
+-    )
+-
+-     add_definitions(/bigobj) # /experimental:module
++   set_target_properties (
++${BINARY_NAME} PROPERTIES
++WIN32_EXECUTABLE ON
++VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)/$(Configuration)/"
++VS_DEBUGGER_COMMAND_ARGUMENTS "$(SolutionDir)../dist"
++)
++target_compile_options(${BINARY_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj /utf-8>)
+ endif ()
+ 
+ if (LINUX)
+diff --git a/JoyShockMapper/include/FAALAssignments.h b/JoyShockMapper/include/FAALAssignments.h
+new file mode 100644
+index 0000000..993af61
+--- /dev/null
++++ b/JoyShockMapper/include/FAALAssignments.h
+@@ -0,0 +1,26 @@
++// FAALAssignments.h
++#pragma once
++#include "JSMAssignment.hpp"
++#include "FAALSettings.h"
++
++class FaalFloatAssignment : public JSMAssignment<float>
++{
++public:
++	FaalFloatAssignment(SettingID id, JSMSetting<float>& setting)
++	  : JSMAssignment(magic_enum::enum_name(id).data(),
++	      string(magic_enum::enum_name(setting._id)),
++	      setting)
++	{
++	}
++};
++
++class FaalIntAssignment : public JSMAssignment<int>
++{
++public:
++	FaalIntAssignment(SettingID id, JSMSetting<int>& setting)
++	  : JSMAssignment(magic_enum::enum_name(id).data(),
++	      string(magic_enum::enum_name(setting._id)),
++	      setting)
++	{
++	}
++};
+\ No newline at end of file
 diff --git a/JoyShockMapper/include/FAALSettings.h b/JoyShockMapper/include/FAALSettings.h
 new file mode 100644
 index 0000000..f0b969b
@@ -114,6 +200,53 @@ index 0000000..20fb41d
 +	void sendKeyboardReport();
 +};
 \ No newline at end of file
+diff --git a/JoyShockMapper/include/InputHelpers.h b/JoyShockMapper/include/InputHelpers.h
+index 5f0dedb..ee2f6b3 100644
+--- a/JoyShockMapper/include/InputHelpers.h
++++ b/JoyShockMapper/include/InputHelpers.h
+@@ -15,14 +15,20 @@
+ #include <mutex>
+ #include <condition_variable>
+ 
+-enum class CommandSource { CONSOLE, FIFO, INTERNAL };
++enum class CommandSource
++{
++	CONSOLE,
++	FIFO,
++	INTERNAL
++};
+ 
+-struct Command {
+-    std::string text;
+-    CommandSource source;
++struct Command
++{
++	std::string text;
++	CommandSource source;
+ };
+ #endif
+-// Setup the input pipe for console input 
++// Setup the input pipe for console input
+ #ifndef _WIN32
+ extern int input_pipe_fd[2];
+ 
+@@ -32,7 +38,6 @@ extern std::condition_variable commandQueueCV;
+ 
+ #endif
+ 
+-
+ // get the user's mouse sensitivity multiplier from the user. In Windows it's an int, but who cares? it's well within range for float to represent it exactly
+ // also, if this is ported to other platforms, we might want non-integer sensitivities
+ float getMouseSpeed();
+@@ -176,3 +181,7 @@ bool IsVisible();
+ bool isConsoleMinimized();
+ 
+ bool ClearConsole();
++
++
++class FakerInputBackend;
++FakerInputBackend &getFakerBackend();
+\ No newline at end of file
 diff --git a/JoyShockMapper/include/JoyShockMapper.h b/JoyShockMapper/include/JoyShockMapper.h
 index 48065c1..be0f969 100644
 --- a/JoyShockMapper/include/JoyShockMapper.h
@@ -149,152 +282,549 @@ index 48065c1..be0f969 100644
  	INVALID
  };
  
+diff --git a/JoyShockMapper/include/faal.h b/JoyShockMapper/include/faal.h
+new file mode 100644
+index 0000000..e00303f
+--- /dev/null
++++ b/JoyShockMapper/include/faal.h
+@@ -0,0 +1,513 @@
++/*
++ * faal.h - FAAL anti-shake filter, C99 ABI.
++ *
++ * One header, one source file, no dependencies. Every language can either
++ * compile faal.c into itself or call the prebuilt library through FFI.
++ *
++ * Threading: a context must not be used from two threads at once. Parameters
++ * may be changed from the same thread between calls.
++ */
++#ifndef FAAL_H
++#define FAAL_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(FAAL_BUILD_DLL)
++#  define FAAL_API __declspec(dllexport)
++#elif defined(FAAL_USE_DLL)
++#  define FAAL_API __declspec(dllimport)
++#else
++#  define FAAL_API
++#endif
++
++/* ABI version. Bump only when an existing field or function changes meaning. */
++#define FAAL_ABI_VERSION 1
++
++/*
++ * Parameters. The first field is always `size`: fill it with sizeof(FaalParams).
++ * Fields appended later are only read when `size` covers them, so old callers
++ * keep working against a newer library.
++ */
++typedef struct FaalParams
++{
++	unsigned int size;
++
++	/* peak tracking */
++	float peakDecayTime;    /* s, peak decay when the input stops rising */
++	float peakMinTrigger;   /* deg/s, below this the peak tracker is ignored */
++
++	/* drop-slope suppression */
++	float dropSensitivity;  /* gain applied to the drop rate */
++	float dropCurve;        /* exponent applied to the suppressed result */
++
++	/* hysteresis */
++	float hystRiseTime;     /* s, how fast suppression engages */
++	float hystFallTime;     /* s, how fast it releases */
++
++	/* freeze window (0 duration disables it) */
++	float suppressThr;      /* 0..1, above this the freeze window re-arms */
++	float freezeDurationSec;
++	float freezeOutMul;     /* output multiplier while frozen */
++
++	/* sign-change override (0 disables it) */
++	float signChangeThr;
++
++	/* drift hold */
++	int   enableDriftHold;
++	float driftThreshold;   /* deg/s */
++	float driftHoldTimeSec;
++
++	/* smoothing */
++	float oneEuroFcMin;     /* Hz, cutoff floor */
++	float oneEuroBeta;      /* Hz per deg/s */
++	float smoothThreshold;  /* deg/s, above this nothing is smoothed. 0 = no smoothing */
++
++	/* vector reversal */
++	int   enableVectorReversal;
++	float dirChangeMagRatio;
++	float dirChangeAngleRad;
++	float smoothTimeSec;    /* s, memory of the reversal reference */
++} FaalParams;
++
++typedef struct Faal Faal;
++
++/* Convenience path: the library allocates. Returns NULL on allocation failure. */
++FAAL_API Faal *faal_new(void);
++FAAL_API void  faal_free(Faal *ctx);
++
++/* Embedded path: caller-provided storage, no allocation at all. */
++FAAL_API unsigned int faal_size(void);
++FAAL_API void faal_init(Faal *ctx, const FaalParams *params);
++
++FAAL_API void faal_defaults(FaalParams *out);
++FAAL_API void faal_set_params(Faal *ctx, const FaalParams *params);
++
++/* Filters in place. dim is 2 or 3. dt is in seconds. */
++FAAL_API void faal_process(Faal *ctx, float *v, int dim, float dt);
++
++FAAL_API void faal_reset(Faal *ctx);
++
++#ifdef __cplusplus
++}
++#endif
++
++/* ------------------------------ implementation ------------------------------ */
++#ifdef FAAL_IMPLEMENTATION
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * faal.c - FAAL anti-shake filter, C99 implementation.
++ *
++ * Layout and maths mirror the C++ implementation used by JoyShockMapper, so the
++ * two produce the same numbers for the same input.
++ */
++/* implementation included from the same header */
++
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define FAAL_PI 3.14159265358979323846
++
++typedef struct Axis
++{
++	float peakValue;
++	float prevAbsV;
++	float prevV;
++	float stillTimeSec;
++	float freezeRemainingSec;
++	float suppressHyst;
++	float oneEuroPrev;
++} Axis;
++
++struct Faal
++{
++	FaalParams params;
++	float hystFallFastTime; /* derived: hystFallTime * 0.446 */
++	Axis ax;
++	Axis ay;
++	Axis az;
++	int first;
++	int mode; /* 0 unused, 2 two-axis, 3 three-axis */
++	float dirX, dirY, dirZ;
++};
++
++static float clampf(float v, float lo, float hi)
++{
++	if (v < lo) return lo;
++	if (v > hi) return hi;
++	return v;
++}
++
++static void axis_reset(Axis *a)
++{
++	memset(a, 0, sizeof(*a));
++}
++
++static void ctx_reset(Faal *ctx)
++{
++	axis_reset(&ctx->ax);
++	axis_reset(&ctx->ay);
++	axis_reset(&ctx->az);
++	ctx->first = 1;
++	ctx->dirX = ctx->dirY = ctx->dirZ = 0.0f;
++}
++
++static float one_euro(float x, float dt, float fc, float *prev)
++{
++	float tau = 1.0f / (2.0f * (float)FAAL_PI * fc + 0.00001f);
++	float alpha = 1.0f / (1.0f + tau / dt);
++	float out = alpha * x + (1.0f - alpha) * *prev;
++	*prev = out;
++	return out;
++}
++
++/* Soft-tiered split: 0 = fully smoothed, 1 = fully direct. */
++static float tier_weight(const FaalParams *p, float speed)
++{
++	float top = p->smoothThreshold;
++	float bottom;
++
++	if (top <= 0.0f)
++		return 1.0f; /* threshold 0: no smoothing at all */
++
++	bottom = top * 0.5f;
++	if (speed <= bottom) return 0.0f;
++	if (speed >= top) return 1.0f;
++	return (speed - bottom) / (top - bottom);
++}
++
++static float do_filter(const FaalParams *p, Axis *st, float v, float dt,
++                       int forceSuppress, float tierWeight, float vectorSpeed)
++{
++	float absV = fabsf(v);
++	float dropSpeed = 0.0f;
++	float riseFactor, fastFallFactor, slowFallFactor, fallFactor;
++	float rawSuppress = 0.0f;
++	float out, directPart, smoothed;
++
++	/* 1) drop rate, normalised to 1 kHz and to the current peak */
++	if (st->peakValue > p->peakMinTrigger)
++	{
++		float deltaAbsV = st->prevAbsV - absV;
++		if (deltaAbsV > 0.0f)
++			dropSpeed = deltaAbsV / (dt * 1000.0f) / (st->peakValue + 0.001f);
++	}
++
++	/* 2) frame-rate independent hysteresis coefficients */
++	riseFactor = 1.0f - expf(-dt / p->hystRiseTime);
++	fastFallFactor = 1.0f - expf(-dt / (p->hystFallTime * 0.446f));
++	slowFallFactor = 1.0f - expf(-dt / p->hystFallTime);
++	fallFactor = fastFallFactor + (slowFallFactor - fastFallFactor) * st->suppressHyst;
++	fallFactor = clampf(fallFactor, 0.0f, 1.0f);
++
++	/* 3) peak tracking */
++	if (absV > st->peakValue)
++		st->peakValue = absV;
++	else
++		st->peakValue *= expf(-dt / p->peakDecayTime);
++
++	/* 4) drift hold */
++	if (p->enableDriftHold && p->driftHoldTimeSec > 0.0f)
++	{
++		if (absV < p->driftThreshold)
++			st->stillTimeSec += dt;
++		else
++			st->stillTimeSec = 0.0f;
++
++		if (st->stillTimeSec >= p->driftHoldTimeSec)
++		{
++			axis_reset(st);
++			return 0.0f;
++		}
++	}
++
++	/* 5) drop-slope suppression */
++	if (st->peakValue > p->peakMinTrigger)
++	{
++		float raw = clampf(dropSpeed * p->dropSensitivity, 0.0f, 1.0f);
++		rawSuppress = powf(raw, p->dropCurve);
++	}
++
++	/* 6) sign-change override */
++	if (p->signChangeThr > 0.0f && st->peakValue > p->peakMinTrigger)
++	{
++		int bothNonZero = (st->prevV != 0.0f) && (v != 0.0f);
++		int signedFlip = bothNonZero && ((st->prevV < 0.0f) != (v < 0.0f));
++		float refDeltaV = fabsf(v - st->prevV) / (dt * 1000.0f);
++		if (signedFlip && refDeltaV > p->signChangeThr)
++		{
++			rawSuppress = 1.0f;
++			st->suppressHyst = 1.0f;
++		}
++	}
++
++	/* 7) vector reversal override */
++	if (forceSuppress)
++	{
++		rawSuppress = 1.0f;
++		st->suppressHyst = 1.0f;
++	}
++
++	/* 8) hysteresis */
++	if (rawSuppress > st->suppressHyst)
++		st->suppressHyst = st->suppressHyst * (1.0f - riseFactor) + rawSuppress * riseFactor;
++	else
++		st->suppressHyst = st->suppressHyst * (1.0f - fallFactor) + rawSuppress * fallFactor;
++	st->suppressHyst = clampf(st->suppressHyst, 0.0f, 1.0f);
++
++	st->prevAbsV = absV;
++
++	/* 9) tiered One Euro. The filter is fed the slow share only, and is fed a
++	 *    zero share when everything is direct so its state drains. */
++	directPart = v * tierWeight;
++	smoothed = one_euro(v * (1.0f - tierWeight), dt,
++	                    p->oneEuroFcMin + p->oneEuroBeta * vectorSpeed,
++	                    &st->oneEuroPrev);
++	out = directPart + smoothed;
++
++	/* 10) suppression and freeze window */
++	out *= (1.0f - st->suppressHyst);
++
++	if (p->freezeDurationSec > 0.0f)
++	{
++		if (st->suppressHyst > p->suppressThr)
++			st->freezeRemainingSec = p->freezeDurationSec;
++		if (st->freezeRemainingSec > 0.0f)
++		{
++			out *= p->freezeOutMul;
++			st->freezeRemainingSec -= dt;
++			if (st->freezeRemainingSec < 0.0f)
++				st->freezeRemainingSec = 0.0f;
++		}
++	}
++
++	st->prevV = v;
++	return out;
++}
++
++static int check_reversal_3d(const FaalParams *p,
++                             float cx, float cy, float cz,
++                             float px, float py, float pz)
++{
++	float prevLen2, curLen2, prevLen, curLen, cosTheta, sinTheta;
++
++	if (!p->enableVectorReversal)
++		return 0;
++
++	prevLen2 = px * px + py * py + pz * pz;
++	curLen2 = cx * cx + cy * cy + cz * cz;
++	if (prevLen2 < 1e-12f || curLen2 < 1e-12f)
++		return 0;
++
++	prevLen = sqrtf(prevLen2);
++	curLen = sqrtf(curLen2);
++	cosTheta = clampf((px * cx + py * cy + pz * cz) / (prevLen * curLen), -1.0f, 1.0f);
++
++	if (cosTheta >= cosf(p->dirChangeAngleRad))
++		return 0;
++
++	sinTheta = sqrtf(clampf(1.0f - cosTheta * cosTheta, 0.0f, 1.0f));
++	return sinTheta > p->dirChangeMagRatio;
++}
++
++/* ------------------------------------------------------------------------- */
++/* public API                                                                */
++/* ------------------------------------------------------------------------- */
++
++unsigned int faal_size(void)
++{
++	return (unsigned int)sizeof(Faal);
++}
++
++Faal *faal_new(void)
++{
++	Faal *ctx = (Faal *)malloc(sizeof(Faal));
++	FaalParams p;
++
++	if (!ctx)
++		return NULL;
++	memset(ctx, 0, sizeof(*ctx));
++	faal_defaults(&p);
++	faal_init(ctx, &p);
++	return ctx;
++}
++
++void faal_free(Faal *ctx)
++{
++	free(ctx);
++}
++
++void faal_defaults(FaalParams *out)
++{
++	if (!out)
++		return;
++	memset(out, 0, sizeof(*out));
++
++	out->size = (unsigned int)sizeof(FaalParams);
++
++	out->peakDecayTime = 0.065f;
++	out->peakMinTrigger = 2.0f;
++
++	out->dropSensitivity = 2.5f;
++	out->dropCurve = 2.0f;
++
++	out->hystRiseTime = 0.0029f;
++	out->hystFallTime = 0.065f;
++
++	out->suppressThr = 0.5f;
++	out->freezeDurationSec = 0.0f;
++	out->freezeOutMul = 0.2f;
++
++	out->signChangeThr = 1.5f;
++
++	out->enableDriftHold = 1;
++	out->driftThreshold = 0.15f;
++	out->driftHoldTimeSec = 0.2f;
++
++	out->oneEuroFcMin = 2.0f;
++	out->oneEuroBeta = 0.5f;
++	out->smoothThreshold = 0.0f;
++
++	out->enableVectorReversal = 0;
++	out->dirChangeMagRatio = 0.3f;
++	out->dirChangeAngleRad = 1.570796f;
++	out->smoothTimeSec = 0.1f;
++}
++
++void faal_init(Faal *ctx, const FaalParams *params)
++{
++	if (!ctx)
++		return;
++	memset(ctx, 0, sizeof(*ctx));
++	ctx->first = 1;
++	ctx->mode = 0;
++	if (params)
++		faal_set_params(ctx, params);
++	else
++	{
++		FaalParams d;
++		faal_defaults(&d);
++		ctx->params = d;
++		ctx->hystFallFastTime = d.hystFallTime * 0.446f;
++	}
++}
++
++void faal_set_params(Faal *ctx, const FaalParams *params)
++{
++	FaalParams p;
++
++	if (!ctx || !params)
++		return;
++
++	p = *params;
++	if (p.size == 0)
++		p.size = (unsigned int)sizeof(FaalParams);
++
++	/* Only clamp what would otherwise divide by zero or blow up. */
++	p.hystRiseTime = clampf(p.hystRiseTime, 1e-4f, 1.0f);
++	p.hystFallTime = clampf(p.hystFallTime, 1e-4f, 1.0f);
++	p.peakDecayTime = clampf(p.peakDecayTime, 1e-4f, 1.0f);
++	p.smoothTimeSec = clampf(p.smoothTimeSec, 1e-3f, 1.0f);
++	p.dropCurve = clampf(p.dropCurve, 0.1f, 10.0f);
++	p.oneEuroFcMin = clampf(p.oneEuroFcMin, 0.01f, 100.0f);
++
++	ctx->params = p;
++	ctx->hystFallFastTime = p.hystFallTime * 0.446f;
++}
++
++void faal_reset(Faal *ctx)
++{
++	if (!ctx)
++		return;
++	ctx_reset(ctx);
++	ctx->mode = 0;
++}
++
++void faal_process(Faal *ctx, float *v, int dim, float dt)
++{
++	const FaalParams *p;
++	int forceSuppress = 0;
++	float speed, w, alpha;
++	float x, y, z = 0.0f;
++
++	if (!ctx || !v || (dim != 2 && dim != 3))
++		return;
++
++	/* Switching dimensionality resets, so the two paths never share stale state. */
++	if (ctx->mode != 0 && ctx->mode != dim)
++	{
++		ctx_reset(ctx);
++		ctx->first = 1;
++	}
++	ctx->mode = dim;
++
++	dt = clampf(dt, 1e-3f, 0.05f);
++
++	p = &ctx->params;
++	x = v[0];
++	y = v[1];
++	if (dim == 3)
++		z = v[2];
++
++	if (ctx->first)
++	{
++		ctx_reset(ctx);
++		ctx->first = 0;
++	}
++
++	alpha = 1.0f - expf(-dt / p->smoothTimeSec);
++
++	/* Reversal is judged against the reference *before* absorbing this sample. */
++	if (p->enableVectorReversal)
++	{
++		if (dim == 2)
++		{
++			float prevLen2 = ctx->dirX * ctx->dirX + ctx->dirY * ctx->dirY;
++			float curLen2 = x * x + y * y;
++			if (prevLen2 > 1e-12f && curLen2 > 1e-12f)
++			{
++				float cosTheta = clampf((ctx->dirX * x + ctx->dirY * y) /
++				                        (sqrtf(prevLen2) * sqrtf(curLen2)),
++				                        -1.0f, 1.0f);
++				if (cosTheta < cosf(p->dirChangeAngleRad))
++					forceSuppress = sqrtf(clampf(1.0f - cosTheta * cosTheta, 0.0f, 1.0f)) >
++					                p->dirChangeMagRatio;
++			}
++		}
++		else
++		{
++			forceSuppress = check_reversal_3d(p, x, y, z, ctx->dirX, ctx->dirY, ctx->dirZ);
++		}
++	}
++
++	ctx->dirX += alpha * (x - ctx->dirX);
++	ctx->dirY += alpha * (y - ctx->dirY);
++	if (dim == 3)
++		ctx->dirZ += alpha * (z - ctx->dirZ);
++
++	if (dim == 2)
++		speed = sqrtf(x * x + y * y);
++	else
++		speed = sqrtf(x * x + y * y + z * z);
++
++	w = tier_weight(p, speed);
++
++	v[0] = do_filter(p, &ctx->ax, x, dt, forceSuppress, w, speed);
++	v[1] = do_filter(p, &ctx->ay, y, dt, forceSuppress, w, speed);
++	if (dim == 3)
++		v[2] = do_filter(p, &ctx->az, z, dt, forceSuppress, w, speed);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* FAAL_IMPLEMENTATION */
++
++#endif /* FAAL_H */
+\ No newline at end of file
 diff --git a/JoyShockMapper/include/faal_filter.h b/JoyShockMapper/include/faal_filter.h
 new file mode 100644
-index 0000000..2091004
+index 0000000..f8cafd0
 --- /dev/null
 +++ b/JoyShockMapper/include/faal_filter.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,24 @@
 +#pragma once
 +
-+// ============================================================================
-+//  FAAL filter — public API + parameters + per-axis state
-+//  Frame-rate independent version.
++// JSM-side per-frame recording. Deliberately separate from faal.h: the filter
++// stays a dependency-free algorithm, while this only exists to debug JSM.
 +//
-+//  Key guarantees:
-+//   * Hysteresis / peak decay / smoothing use exp(-dt/tau)             => FRI
-+//   * dropSpeed and sign-change deltas are normalized to a 1000 Hz
-+//     reference so the same physical motion produces the same value
-+//     at any actual tick rate
-+//   * Freeze window and drift hold accumulate TIME (float seconds)
-+//   * Vector reversal uses pure angular comparison
-+//   * Two-axis API is fully independent: does not touch Z-axis state
-+//   * One Euro exposes only fc_min and beta; derivative channel is a
-+//     passthrough (alpha_d = 1)
-+//
-+//  Hysteresis (adaptive fall, no thresholds / no magic numbers):
-+//   * RISE_TIME     : ramp-up time (s)                 — user
-+//   * FALL_TIME     : ramp-down time at full suppress  — user
-+//   * PEAK_DECAY    : peak tracking decay time (s)     — user (independent)
-+//   * fallFastTime  = FALL_TIME × 0.446                — derived
-+//   Per-frame adaptive fall:
-+//     fall = fastFall + (slowFall - fastFall) × suppressHyst
-+//   Strong suppression (flick just ended) → slow (sticky)
-+//   Weak suppression (normal tracking)    → fast (responsive)
-+// ============================================================================
++// The file keeps its original name because the build system already lists it;
++// the filter itself now lives in faal.h.
++#include "faal.h"
 +
-+struct FaalParams
-+{
-+	// ---- Peak tracking --------------------------------------------------
-+	// Independent user parameter; controls how fast the peak tracker decays.
-+	float peakDecayTime = 0.065f;
-+	float peakMinTrigger = 2.0f;
-+
-+	// ---- Drop-slope suppression -----------------------------------------
-+	float dropSensitivity = 2.5f;
-+	float dropCurve = 2.0f;
-+
-+	// ---- Suppress hysteresis (adaptive fall) ----------------------------
-+	// USER: hystRiseTime, hystFallTime, peakDecayTime
-+	// DERIVED: hystFallFastTime = hystFallTime × 0.446
-+	float hystRiseTime = 0.0029f;
-+	float hystFallTime = 0.065f;
-+	float hystFallFastTime = 0.029f; // DERIVED
-+
-+	// ---- Optional freeze window -----------------------------------------
-+	float suppressThr = 0.5f;
-+	float freezeDurationSec = 0.0f;
-+	float freezeOutMul = 0.2f;
-+
-+	// ---- Sign-change trigger --------------------------------------------
-+	float signChangeThr = 1.5f;
-+
-+	// ---- Drift hold ------------------------------------------------------
-+	bool enableDriftHold = true;
-+	float driftThreshold = 0.15f;
-+	float driftHoldTimeSec = 0.2f;
-+
-+	// ---- One Euro Filter -------------------------------------------------
-+	// Only fc_min and beta. Derivative passthrough (alpha_d = 1).
-+	float oneEuroFcMin = 2.0f;
-+	float oneEuroBeta = 0.08f;
-+	// Soft-tiered smoothing: above this speed (deg/s) nothing is smoothed at all.
-+	// 0 = no smoothing at all (One Euro bypassed). Large value = everything smoothed.
-+	float smoothThreshold = 0.0f;
-+
-+	// ---- Vector reversal detection --------------------------------------
-+	float enableVectorReversal = 0.0f;
-+	float dirChangeMagRatio = 0.3f;
-+	float dirChangeAngleRad = 1.5f;
-+
-+	// ---- Smoothing time for direction EWMA ------------------------------
-+	float smoothTimeSec = 0.020f;
-+};
-+
-+struct AxisState
-+{
-+	float smoothedSpeedDiff;
-+	float prevShapedNorm;
-+	float ringData[32];
-+	int ringCount = 0;
-+	int ringIdx = 0;
-+	float ringAvg = 0.0f;
-+
-+	float peakValue = 0.0f;
-+	float prevPeakValue = 0.0f;
-+	float prevOut = 0.0f;
-+	float prevAbsV = 0.0f;
-+	float prevV = 0.0f;
-+
-+	// Accumulated TIME (seconds) — frame-rate independent.
-+	float stillTimeSec = 0.0f;
-+	float freezeRemainingSec = 0.0f;
-+
-+	float suppressHyst = 0.0f;
-+
-+	float oneEuroPrev = 0.0f;
-+	float oneEuroDeriv = 0.0f;
-+
-+	void init()
-+	{
-+		smoothedSpeedDiff = 0.0f;
-+		prevShapedNorm = 0.0f;
-+		ringCount = ringIdx = 0;
-+		ringAvg = peakValue = prevPeakValue = prevOut = prevAbsV = prevV = 0.0f;
-+		stillTimeSec = freezeRemainingSec = 0.0f;
-+		suppressHyst = 0.0f;
-+		oneEuroPrev = 0.0f;
-+		oneEuroDeriv = 0.0f;
-+		for (int i = 0; i < 32; ++i)
-+			ringData[i] = 0.0f;
-+	}
-+};
-+
-+void faal_filter(float& outX, float& outY, float dt);
-+void faal_filter(float& outX, float& outY, float& outZ, float dt);
-+void ResetFaalFilter();
-+const FaalParams& GetFaalParams();
-+void SetFaalParams(const FaalParams& p);
-+
-+// ---------------------------------------------------------------------------
-+//  Per-frame trace (optional, off by default).
-+//  Records the filter INPUT and the parameters actually in force that frame,
-+//  plus the raw 3D signal it was derived from, so a real play session can be
-+//  replayed offline and re-projected into any gyro space.
-+//  Cost while recording: one branch + a 68 byte store per frame.
-+//  Cost while off: one predictable branch.
-+// ---------------------------------------------------------------------------
 +struct FaalTraceInput
 +{
-+	float dt = 0.f;
-+	float gyroX = 0.f, gyroY = 0.f, gyroZ = 0.f;   // values handed to faal_filter()
-+	float rawX = 0.f, rawY = 0.f, rawZ = 0.f;       // calibrated gyro, before the gyro-space transform
-+	float gravX = 0.f, gravY = 0.f, gravZ = 0.f;    // gravity estimate, same frame
-+	float quatW = 1.f, quatX = 0.f, quatY = 0.f, quatZ = 0.f;
-+	// What actually left the filter towards the consumer:
-+	//   2D path  -> the filtered (yaw, pitch) that feeds sensitivity
-+	//   PS_MOTION -> the (x, y, z) forwarded to the virtual controller
-+	float outX = 0.f, outY = 0.f, outZ = 0.f;
++	float dt;
++	float gyroX, gyroY, gyroZ;   // calibrated gyro that entered the filter
++	float rawX, rawY, rawZ;      // calibrated gyro before the space transform
++	float gravX, gravY, gravZ;
++	float quatW, quatX, quatY, quatZ;
++	float outX, outY, outZ;      // what actually left the filter
 +};
 +
 +void FaalTraceStart();
@@ -302,7 +832,6 @@ index 0000000..2091004
 +unsigned long long FaalTraceRecordedFrames();
 +void FaalTraceRecord(const FaalTraceInput& in, const FaalParams& applied);
 +unsigned long long FaalTraceStopAndWrite(const char* path);
-\ No newline at end of file
 diff --git a/JoyShockMapper/src/JoyShock.cpp b/JoyShockMapper/src/JoyShock.cpp
 index 6c63fba..a056c0d 100644
 --- a/JoyShockMapper/src/JoyShock.cpp
@@ -418,387 +947,35 @@ index c68f04d..290fc6a 100644
  	static constexpr auto callReset = [](SettingsMap::value_type &kvPair)
 diff --git a/JoyShockMapper/src/faal_filter.cpp b/JoyShockMapper/src/faal_filter.cpp
 new file mode 100644
-index 0000000..04ec305
+index 0000000..36cf148
 --- /dev/null
 +++ b/JoyShockMapper/src/faal_filter.cpp
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,122 @@
 +#include "faal_filter.h"
-+#include <math.h>
-+#include <stdio.h>
++
 +#include <atomic>
++#include <cstdio>
 +
-+static FaalParams g_params;
-+
-+static AxisState s_faal_stateX;
-+static AxisState s_faal_stateY;
-+static AxisState s_faal_stateZ;
-+static bool s_faal_firstFrame = true;
-+
-+// ResetFaalFilter() is called from the command thread while the input polling
-+// thread may be inside faal_filter(). Touching the state from both sides is a
-+// data race, so a reset is only *requested* here and applied by the next call to
-+// faal_filter(), which always runs on the polling thread.
-+static std::atomic<bool> s_faal_resetRequested{ false };
-+
-+static float s_smoothDirX = 0.0f;
-+static float s_smoothDirY = 0.0f;
-+static float s_smoothDirZ = 0.0f;
-+
-+// ---------------------------------------------------------------------------
-+//  Internal constants
-+// ---------------------------------------------------------------------------
-+static const float kDtMin = 1e-3f;            // 1 ms
-+static const float kDtMax = 0.05f;            // 50 ms
-+static const float kDropSpeedRefHz = 1000.0f; // 1000Hz reference for dropSpeed/signChange
-+
-+static inline float faal_abs(float v)
++namespace
 +{
-+	return (v < 0.0f) ? -v : v;
++	struct FaalTraceSample
++	{
++		float dt, gx, gy, gz;
++		float signChangeThr, freezeDurationSec, enableVectorReversal, smoothTimeSec;
++		// v2: everything needed to re-derive the 2D values in any gyro space offline.
++		float rawX, rawY, rawZ;       // calibrated gyro before the space transform
++		float gravX, gravY, gravZ;    // gravity estimate that frame
++		float quatW, quatX, quatY, quatZ;
++		float outX, outY, outZ;       // what actually left the filter
++	};
++
++	const size_t kFaalTraceCapacity = 150000; // ≈150 s at 1000 Hz, ≈10.2 MB
++	FaalTraceSample* s_traceSamples = nullptr;
++	// Written on the polling thread, read/replaced on the command thread.
++	std::atomic<size_t> s_traceCount{ 0 };
++	std::atomic<bool> s_traceRecording{ false };
++	FaalParams s_lastParams{};
 +}
-+
-+static inline float faal_clamp(float v, float lo, float hi)
-+{
-+	if (v < lo)
-+		return lo;
-+	if (v > hi)
-+		return hi;
-+	return v;
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  One Euro Filter (passthrough derivative, alpha_d = 1)
-+// ---------------------------------------------------------------------------
-+static float oneEuroFilter(float x, float dt, float fc_min, float beta,
-+  float& x_prev, float& dx_prev)
-+{
-+	float dx = (x - x_prev) / dt;
-+	dx_prev = dx;
-+
-+	float fc = fc_min + beta * faal_abs(dx_prev);
-+	float tau = 1.0f / (2.0f * 3.14159265f * fc + 0.00001f);
-+	float alpha = 1.0f / (1.0f + tau / dt);
-+
-+	float x_out = alpha * x + (1.0f - alpha) * x_prev;
-+	x_prev = x_out;
-+	return x_out;
-+}
-+
-+// Same filter, but the cutoff is decided by the caller. The tier split needs the
-+// speed of the *whole* vector, so the per-axis function must not work it out from
-+// its own input — two axes with different cutoffs would rotate the vector.
-+static float oneEuroWithCutoff(float x, float dt, float fc, float& x_prev)
-+{
-+	float tau = 1.0f / (2.0f * 3.14159265f * fc + 0.00001f);
-+	float alpha = 1.0f / (1.0f + tau / dt);
-+	float x_out = alpha * x + (1.0f - alpha) * x_prev;
-+	x_prev = x_out;
-+	return x_out;
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  Per-axis processing
-+// ---------------------------------------------------------------------------
-+
-+// Tier weight for the soft-tiered split: 0 = fully smoothed, 1 = fully direct.
-+// Derived from the whole vector's speed so both axes split identically.
-+static float smoothTierWeight(float speed)
-+{
-+	float top = g_params.smoothThreshold;
-+	if (top <= 0.0f)
-+		return 1.0f; // threshold 0 means "no smoothing at all": everything direct
-+	float bottom = top * 0.5f;
-+	if (speed <= bottom)
-+		return 0.0f;
-+	if (speed >= top)
-+		return 1.0f;
-+	return (speed - bottom) / (top - bottom);
-+}
-+static float doFilter(AxisState& st, float v, float dt, bool forceSuppress,
-+  float tierWeight, float vectorSpeed)
-+{
-+	float absV = faal_abs(v);
-+
-+	// ---- 1) dropSpeed (1000 Hz normalized) ------------------------------
-+	float dropSpeed = 0.0f;
-+	if (st.peakValue > g_params.peakMinTrigger)
-+	{
-+		float deltaAbsV = st.prevAbsV - absV;
-+		if (deltaAbsV > 0.0f)
-+		{
-+			dropSpeed = deltaAbsV / (dt * kDropSpeedRefHz) /
-+			  (st.peakValue + 0.001f);
-+		}
-+	}
-+
-+	// ---- 2) Frame-rate independent hysteresis coefficients --------------
-+	float riseFactor = 1.0f - expf(-dt / g_params.hystRiseTime);
-+	float fastFallFactor = 1.0f - expf(-dt / g_params.hystFallFastTime);
-+	float slowFallFactor = 1.0f - expf(-dt / g_params.hystFallTime);
-+
-+	// ---- 3) Adaptive fall factor ----------------------------------------
-+	// Use the PREVIOUS frame's suppressHyst as the adaptive signal.
-+	// Strong suppression (flick just ended) → slow fall (sticky).
-+	// Weak suppression (normal tracking)    → fast fall (responsive).
-+	// No thresholds. State drives itself.
-+	float fallFactor = fastFallFactor +
-+	  (slowFallFactor - fastFallFactor) * st.suppressHyst;
-+	fallFactor = faal_clamp(fallFactor, 0.0f, 1.0f);
-+
-+	// ---- 4) Peak tracking (independent peakDecayTime) -------------------
-+	st.prevPeakValue = st.peakValue;
-+	if (absV > st.peakValue)
-+		st.peakValue = absV;
-+	else
-+		st.peakValue *= expf(-dt / g_params.peakDecayTime);
-+
-+	// ---- 5) Drift hold --------------------------------------------------
-+	if (g_params.enableDriftHold && g_params.driftHoldTimeSec > 0.0f)
-+	{
-+		if (absV < g_params.driftThreshold)
-+			st.stillTimeSec += dt;
-+		else
-+			st.stillTimeSec = 0.0f;
-+
-+		if (st.stillTimeSec >= g_params.driftHoldTimeSec)
-+		{
-+			st.prevOut = st.peakValue = st.prevPeakValue = st.prevAbsV = st.prevV = 0.0f;
-+			st.suppressHyst = 0.0f;
-+			st.freezeRemainingSec = 0.0f;
-+			st.stillTimeSec = 0.0f;
-+			st.oneEuroPrev = 0.0f;
-+			st.oneEuroDeriv = 0.0f;
-+			return 0.0f;
-+		}
-+	}
-+
-+	// ---- 6) Raw suppression ---------------------------------------------
-+	float rawSuppress = 0.0f;
-+	if (st.peakValue > g_params.peakMinTrigger)
-+	{
-+		float raw = faal_clamp(dropSpeed * g_params.dropSensitivity, 0.0f, 1.0f);
-+		rawSuppress = powf(raw, g_params.dropCurve);
-+	}
-+
-+	// ---- 7) Single-frame zero-crossing override -------------------------
-+	if (g_params.signChangeThr > 0.0f && st.peakValue > g_params.peakMinTrigger)
-+	{
-+		bool bothNonZero = (st.prevV != 0.0f) && (v != 0.0f);
-+		bool signedFlip = bothNonZero && ((st.prevV < 0.0f) != (v < 0.0f));
-+		float refDeltaV = faal_abs(v - st.prevV) / (dt * kDropSpeedRefHz);
-+		bool magnitudeJump = refDeltaV > g_params.signChangeThr;
-+		if (signedFlip && magnitudeJump)
-+		{
-+			rawSuppress = 1.0f;
-+			st.suppressHyst = 1.0f;
-+		}
-+	}
-+
-+	// ---- 8) External override (vector reversal) -------------------------
-+	if (forceSuppress)
-+	{
-+		rawSuppress = 1.0f;
-+		st.suppressHyst = 1.0f;
-+	}
-+
-+
-+
-+	// ---- 9) Hysteresis (self-adaptive fall) -----------------------------
-+	if (rawSuppress > st.suppressHyst)
-+	{
-+		st.suppressHyst = st.suppressHyst * (1.0f - riseFactor) +
-+		  rawSuppress * riseFactor;
-+	}
-+	else
-+	{
-+		st.suppressHyst = st.suppressHyst * (1.0f - fallFactor) +
-+		  rawSuppress * fallFactor;
-+	}
-+	st.suppressHyst = faal_clamp(st.suppressHyst, 0.0f, 1.0f);
-+
-+	st.prevAbsV = absV;
-+
-+	// ---- 10) Tiered One Euro smoothing ----------------------------------
-+	// The input is split by magnitude, not the output blended: whatever goes into
-+	// the filter is eventually consumed, so total displacement is preserved and a
-+	// big movement never loads up the filter's state. Above the threshold the
-+	// weight is 1 and the filter is fed zero, which lets it drain.
-+	float directPart = v * tierWeight;
-+	float smoothed = oneEuroWithCutoff(v * (1.0f - tierWeight), dt,
-+	  g_params.oneEuroFcMin + g_params.oneEuroBeta * vectorSpeed,
-+	  st.oneEuroPrev);
-+	float out = directPart + smoothed;
-+
-+	// ---- 11) Apply suppression ------------------------------------------
-+	out *= (1.0f - st.suppressHyst);
-+
-+	// ---- 12) Freeze window ----------------------------------------------
-+	if (g_params.freezeDurationSec > 0.0f)
-+	{
-+		if (st.suppressHyst > g_params.suppressThr)
-+			st.freezeRemainingSec = g_params.freezeDurationSec;
-+		if (st.freezeRemainingSec > 0.0f)
-+		{
-+			out *= g_params.freezeOutMul;
-+			st.freezeRemainingSec -= dt;
-+			if (st.freezeRemainingSec < 0.0f)
-+				st.freezeRemainingSec = 0.0f;
-+		}
-+	}
-+
-+	st.prevOut = out;
-+	st.prevV = v;
-+	return out;
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  Vector reversal detection
-+// ---------------------------------------------------------------------------
-+static bool checkVectorReversal3D(float curX, float curY, float curZ,
-+  float prevX, float prevY, float prevZ)
-+{
-+	if (g_params.enableVectorReversal <= 0.5f)
-+		return false;
-+
-+	float prevLen2 = prevX * prevX + prevY * prevY + prevZ * prevZ;
-+	float curLen2 = curX * curX + curY * curY + curZ * curZ;
-+	if (prevLen2 < 1e-12f || curLen2 < 1e-12f)
-+		return false;
-+
-+	float prevLen = sqrtf(prevLen2);
-+	float curLen = sqrtf(curLen2);
-+	float dot = prevX * curX + prevY * curY + prevZ * curZ;
-+	float cosTheta = faal_clamp(dot / (prevLen * curLen), -1.0f, 1.0f);
-+
-+	if (cosTheta >= cosf(g_params.dirChangeAngleRad))
-+		return false;
-+
-+	float sinTheta = sqrtf(faal_clamp(1.0f - cosTheta * cosTheta, 0.0f, 1.0f));
-+	return sinTheta > g_params.dirChangeMagRatio;
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  Two-axis API (independent, does not touch Z state)
-+// ---------------------------------------------------------------------------
-+void faal_filter(float& outX, float& outY, float dt)
-+{
-+	dt = faal_clamp(dt, kDtMin, kDtMax);
-+
-+	if (s_faal_firstFrame || s_faal_resetRequested.exchange(false))
-+	{
-+		s_faal_stateX.init();
-+		s_faal_stateY.init();
-+		s_faal_firstFrame = false;
-+		s_smoothDirX = s_smoothDirY = 0.0f;
-+	}
-+
-+	float alpha = 1.0f - expf(-dt / g_params.smoothTimeSec);
-+
-+	bool forceSuppress = false;
-+	if (g_params.enableVectorReversal > 0.5f)
-+	{
-+		float prevLen2 = s_smoothDirX * s_smoothDirX + s_smoothDirY * s_smoothDirY;
-+		float curLen2 = outX * outX + outY * outY;
-+		if (prevLen2 > 1e-12f && curLen2 > 1e-12f)
-+		{
-+			float prevLen = sqrtf(prevLen2);
-+			float curLen = sqrtf(curLen2);
-+			float dot = s_smoothDirX * outX + s_smoothDirY * outY;
-+			float cosTheta = faal_clamp(dot / (prevLen * curLen), -1.0f, 1.0f);
-+			if (cosTheta < cosf(g_params.dirChangeAngleRad))
-+			{
-+				float sinTheta = sqrtf(faal_clamp(1.0f - cosTheta * cosTheta, 0.0f, 1.0f));
-+				forceSuppress = sinTheta > g_params.dirChangeMagRatio;
-+			}
-+		}
-+	}
-+
-+	// Compare first, then absorb: updating the reference before the comparison pulls
-+	// it towards the current direction and under-reads the turn by (1 - alpha).
-+	s_smoothDirX += alpha * (outX - s_smoothDirX);
-+	s_smoothDirY += alpha * (outY - s_smoothDirY);
-+
-+	{
-+		float speed2 = sqrtf(outX * outX + outY * outY);
-+		float w = smoothTierWeight(speed2);
-+		outX = doFilter(s_faal_stateX, outX, dt, forceSuppress, w, speed2);
-+		outY = doFilter(s_faal_stateY, outY, dt, forceSuppress, w, speed2);
-+	}
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  Three-axis API
-+// ---------------------------------------------------------------------------
-+void faal_filter(float& outX, float& outY, float& outZ, float dt)
-+{
-+	dt = faal_clamp(dt, kDtMin, kDtMax);
-+
-+	if (s_faal_firstFrame || s_faal_resetRequested.exchange(false))
-+	{
-+		s_faal_stateX.init();
-+		s_faal_stateY.init();
-+		s_faal_stateZ.init();
-+		s_faal_firstFrame = false;
-+		s_smoothDirX = s_smoothDirY = s_smoothDirZ = 0.0f;
-+	}
-+
-+	float alpha = 1.0f - expf(-dt / g_params.smoothTimeSec);
-+
-+	bool forceSuppress = checkVectorReversal3D(
-+	  outX, outY, outZ,
-+	  s_smoothDirX, s_smoothDirY, s_smoothDirZ);
-+
-+	// Compare first, then absorb (see the two-axis entry point).
-+	s_smoothDirX += alpha * (outX - s_smoothDirX);
-+	s_smoothDirY += alpha * (outY - s_smoothDirY);
-+	s_smoothDirZ += alpha * (outZ - s_smoothDirZ);
-+
-+	{
-+		float speed3 = sqrtf(outX * outX + outY * outY + outZ * outZ);
-+		float w = smoothTierWeight(speed3);
-+		outX = doFilter(s_faal_stateX, outX, dt, forceSuppress, w, speed3);
-+		outY = doFilter(s_faal_stateY, outY, dt, forceSuppress, w, speed3);
-+		outZ = doFilter(s_faal_stateZ, outZ, dt, forceSuppress, w, speed3);
-+	}
-+}
-+
-+void ResetFaalFilter()
-+{
-+	// Applied by the next faal_filter() call (polling thread) — see the comment
-+	// on s_faal_resetRequested.
-+	s_faal_resetRequested.store(true, std::memory_order_release);
-+}
-+
-+const FaalParams& GetFaalParams()
-+{
-+	return g_params;
-+}
-+
-+void SetFaalParams(const FaalParams& p)
-+{
-+	g_params = p;
-+	// DERIVED: fast fall = 0.446 × fall time (from original 0.029 / 0.065)
-+	g_params.hystFallFastTime = g_params.hystFallTime * 0.446f;
-+}
-+
-+// ---------------------------------------------------------------------------
-+//  Per-frame trace
-+// ---------------------------------------------------------------------------
-+struct FaalTraceSample
-+{
-+	float dt, gx, gy, gz;
-+	float signChangeThr, freezeDurationSec, enableVectorReversal, smoothTimeSec;
-+	// v2: everything needed to re-derive the 2D values in any gyro space offline.
-+	float rawX, rawY, rawZ;       // calibrated gyro before the space transform
-+	float gravX, gravY, gravZ;    // gravity estimate that frame
-+	float quatW, quatX, quatY, quatZ;
-+	float outX, outY, outZ;       // what actually left the filter
-+};
-+
-+static const size_t kFaalTraceCapacity = 150000; // ≈150 s at 1000 Hz, ≈10.2 MB
-+static FaalTraceSample* s_traceSamples = nullptr;
-+// Written on the polling thread, read/replaced on the command thread.
-+static std::atomic<size_t> s_traceCount{ 0 };
-+static std::atomic<bool> s_traceRecording{ false };
 +
 +void FaalTraceStart()
 +{
@@ -822,6 +999,7 @@ index 0000000..04ec305
 +
 +void FaalTraceRecord(const FaalTraceInput& in, const FaalParams& applied)
 +{
++	s_lastParams = applied;
 +	if (!s_traceRecording.load(std::memory_order_relaxed))
 +		return;
 +	const size_t index = s_traceCount.load(std::memory_order_relaxed);
@@ -868,7 +1046,7 @@ index 0000000..04ec305
 +	if (f == nullptr)
 +		return 0;
 +
-+	const FaalParams& p = g_params;
++	const FaalParams& p = s_lastParams;
 +	fprintf(f, "# faal-trace v2\n");
 +	fprintf(f, "# rise=%g fall=%g peakdecay=%g drift=%g fcemin=%g beta=%g magratio=%g angle=%g "
 +	           "drop=%g curve=%g peakmin=%g suppressThr=%g freezeMul=%g driftthr=%g drift_on=%d\n",
@@ -895,21 +1073,37 @@ index 0000000..04ec305
 +	s_traceCount.store(0, std::memory_order_relaxed);
 +	return (unsigned long long)n;
 +}
-\ No newline at end of file
 diff --git a/JoyShockMapper/src/main.cpp b/JoyShockMapper/src/main.cpp
-index 48d1fce..b2a85e5 100644
+index 48d1fce..59d3ae0 100644
 --- a/JoyShockMapper/src/main.cpp
 +++ b/JoyShockMapper/src/main.cpp
-@@ -24,6 +24,8 @@
+@@ -24,6 +24,10 @@
  #include <sstream>
  #define _USE_MATH_DEFINES
  #include <math.h> // M_PI
++#define FAAL_IMPLEMENTATION
++#include "faal.h"
 +#include "faal_filter.h"
 +#include "PlatformDefinitions.h"
  
  #ifdef _WIN32
  #include <shellapi.h>
-@@ -437,6 +439,74 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
+@@ -46,7 +50,14 @@ vector<JSMButton> mappings;      // array enables use of for each loop and other
+ float os_mouse_speed = 1.0;
+ float last_flick_and_rotation = 0.0;
+ bool gyroOneEuroEnabled = false;
++// FAAL is a plain C library; this translation unit owns the one context and
++// is the only place that compiles its implementation.
++static Faal* g_faal = nullptr;
++static FaalParams g_lastFaalParams;
++static std::atomic<bool> s_faalResetRequested{ false };
++
+ unique_ptr<PollingThread> autoLoadThread;
++
+ unique_ptr<JSM::AutoConnect> autoConnectThread;
+ std::atomic<int> g_gyroGlobalOffCount(0);
+ std::atomic<int> g_gyroGlobalOnCount(0);
+@@ -437,6 +448,74 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
  	jsl->SetTriggerEffect(jc->_handle, jc->_leftEffect, jc->_rightEffect);
  }
  
@@ -984,7 +1178,7 @@ index 48d1fce..b2a85e5 100644
  void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
  {
  
-@@ -449,6 +519,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -449,6 +528,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
  	jc->_timeNow = timeNow;
  
@@ -992,7 +1186,7 @@ index 48d1fce..b2a85e5 100644
  	if (triggerCalibrationStep)
  	{
  		calibrateTriggers(jc);
-@@ -470,18 +541,156 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -470,18 +550,166 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	}
  	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
  
@@ -1016,14 +1210,14 @@ index 48d1fce..b2a85e5 100644
 +		p.oneEuroFcMin = jc->getSetting(SettingID::FAAL_ONE_EURO_FC_MIN);
 +		p.oneEuroBeta = jc->getSetting(SettingID::FAAL_ONE_EURO_BETA);
 +		p.smoothThreshold = jc->getSetting(SettingID::FAAL_SMOOTH_THRESHOLD);
-+		p.enableVectorReversal = jc->getSetting(SettingID::FAAL_ENABLE_VECTOR_REVERSAL);
++		p.enableVectorReversal = jc->getSetting(SettingID::FAAL_ENABLE_VECTOR_REVERSAL) > 0.5f ? 1 : 0;
 +		p.dirChangeMagRatio = jc->getSetting(SettingID::FAAL_DIR_CHANGE_MAG_RATIO);
 +		p.dirChangeAngleRad = jc->getSetting(SettingID::FAAL_DIR_CHANGE_ANGLE_RAD);
 +		p.smoothTimeSec = jc->getSetting(SettingID::FAAL_SMOOTH_TIME_SEC);
 +	}
 +	catch (...)
 +	{
-+		p = GetFaalParams();
++		p = g_lastFaalParams;
 +	}
 +
 +	// 内部固定
@@ -1033,7 +1227,10 @@ index 48d1fce..b2a85e5 100644
 +	p.dropSensitivity = 2.4f;
 +	p.dropCurve = 2.0f;
 +
-+	SetFaalParams(p);
++	if (g_faal == nullptr)
++		g_faal = faal_new();
++	faal_set_params(g_faal, &p);
++	g_lastFaalParams = p;
 +
  	float inGyroX, inGyroY, inGyroZ;
  	motion.GetCalibratedGyro(inGyroX, inGyroY, inGyroZ);
@@ -1045,7 +1242,7 @@ index 48d1fce..b2a85e5 100644
 +	// it was switched off, so the first frames after the switch are predictable.
 +	static bool s_faalWasEnabled = true;
 +	if (faalEnabled && !s_faalWasEnabled)
-+		ResetFaalFilter();
++		s_faalResetRequested.store(true, std::memory_order_release);
 +	s_faalWasEnabled = faalEnabled;
 +
 +	GyroOutput gyroOutput = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
@@ -1104,7 +1301,14 @@ index 48d1fce..b2a85e5 100644
 +		const float origPitch = psPitch;
 +
 +		if (faalEnabled)
-+			faal_filter(psYaw, psPitch, deltaTime);
++			{
++			if (s_faalResetRequested.exchange(false))
++				faal_reset(g_faal);
++			float v[2] = { psYaw, psPitch };
++			faal_process(g_faal, v, 2, deltaTime);
++			psYaw = v[0];
++			psPitch = v[1];
++		}
 +
 +		if (psMode == 1)
 +		{
@@ -1150,7 +1354,7 @@ index 48d1fce..b2a85e5 100644
  	// Quat reverseRotation = Quat(cosf(angle * 0.5f), normAxis.x, normAxis.y, normAxis.z);
  	// reverseRotation.Normalize();
  	// jc->_lastGrav *= reverseRotation;
-@@ -539,36 +748,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -539,36 +767,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		int mouse_x_flag = (int)jc->getSetting<GyroAxisMask>(SettingID::MOUSE_X_FROM_GYRO_AXIS);
  		if ((mouse_x_flag & (int)GyroAxisMask::X) > 0)
  		{
@@ -1196,7 +1400,7 @@ index 48d1fce..b2a85e5 100644
  	}
  	else
  	{
-@@ -593,12 +802,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -593,12 +821,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  			if (gyroSpace == GyroSpace::PLAYER_TURN)
  			{
  				// grav dot gyro axis (but only Y (yaw) and Z (roll))
@@ -1211,7 +1415,7 @@ index 48d1fce..b2a85e5 100644
  			}
  			else // PLAYER_LEAN
  			{
-@@ -627,23 +836,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -627,23 +855,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisY *= lengthReciprocal;
  						rollAxisZ *= lengthReciprocal;
  
@@ -1239,7 +1443,7 @@ index 48d1fce..b2a85e5 100644
  			// project local pitch axis (X) onto gravity plane
  			// super simple since our point is only non-zero in one axis
  			float gravDotPitchAxis = normGravX;
-@@ -661,7 +870,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -661,7 +889,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  				pitchAxisZ *= lengthReciprocal;
  
  				// get global pitch factor (dot)
@@ -1248,7 +1452,7 @@ index 48d1fce..b2a85e5 100644
  				// by the way, pinch it towards the nonsense limit
  				gyroY *= sideReduction;
  
-@@ -683,7 +892,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -683,7 +911,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisZ *= lengthReciprocal;
  
  						// get global roll factor (dot)
@@ -1257,7 +1461,7 @@ index 48d1fce..b2a85e5 100644
  						// by the way, pinch because we rely on a good pitch vector here
  						gyroX *= sideReduction;
  					}
-@@ -697,6 +906,16 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -697,6 +925,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		}
  	}
  	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -1266,7 +1470,14 @@ index 48d1fce..b2a85e5 100644
 +	{
 +		const float inX = gyroX, inY = gyroY;
 +		if (faalEnabled)
-+			faal_filter(gyroX, gyroY, deltaTime);
++			{
++				if (s_faalResetRequested.exchange(false))
++					faal_reset(g_faal);
++				float v[2] = { gyroX, gyroY };
++				faal_process(g_faal, v, 2, deltaTime);
++				gyroX = v[0];
++				gyroY = v[1];
++			}
 +		// out_* is what the sensitivity / accel curve actually consumes.
 +		traceInput(inX, inY, 0.f, gyroX, gyroY, 0.f);
 +	}
@@ -1274,7 +1485,7 @@ index 48d1fce..b2a85e5 100644
  	// do gyro smoothing
  	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
  	if (useDecaySmoothing)
-@@ -1597,7 +1816,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1597,7 +1842,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
  	}
  
@@ -1283,7 +1494,7 @@ index 48d1fce..b2a85e5 100644
  	if (!jc->processed_gyro_stick)
  	{
  		if (gyroOutput == GyroOutput::LEFT_STICK)
-@@ -1612,7 +1831,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1612,7 +1857,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		{
  			if (jc->hasVirtualController())
  			{
@@ -1292,31 +1503,31 @@ index 48d1fce..b2a85e5 100644
  			}
  		}
  	}
-@@ -1646,6 +1865,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1646,6 +1891,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  
  void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
  {
-+	ResetFaalFilter();
++	s_faalResetRequested.store(true, std::memory_order_release);
  	handle_to_joyshock.clear();
  	this_thread::sleep_for(100ms);
  	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
-@@ -1774,6 +1994,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
+@@ -1774,6 +2020,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
  	{
  		jc->resetOneEuroFilter();
  	}
-+	ResetFaalFilter();
++	s_faalResetRequested.store(true, std::memory_order_release);
  	g_gyroGlobalOffCount.store(0);
  	g_gyroGlobalOnCount.store(0);
  	g_hasGyroOnAllBinding.store(false);
-@@ -1846,6 +2067,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
+@@ -1846,6 +2093,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
  	 
  	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
  	jsl->DisconnectAndDisposeAll();
-+	ResetFaalFilter();
++	s_faalResetRequested.store(true, std::memory_order_release);
  	connectDevices(mergeJoycons, selectedDeviceIds);
  	jsl->SetCallback(&joyShockPollCallback);
  	jsl->SetTouchCallback(&touchCallback);
-@@ -1887,6 +2109,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
+@@ -1887,6 +2135,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
  	return true;
  }
  
@@ -1355,15 +1566,15 @@ index 48d1fce..b2a85e5 100644
  bool do_ONE_EURO_FILTER()
  {
  	COUT << "One Euro Filter enabled for gyro\n";
-@@ -1895,6 +2149,7 @@ bool do_ONE_EURO_FILTER()
+@@ -1895,6 +2175,7 @@ bool do_ONE_EURO_FILTER()
  	{
  		jc->resetOneEuroFilter();
  	}
-+	ResetFaalFilter();
++	s_faalResetRequested.store(true, std::memory_order_release);
  	return true;
  }
  
-@@ -3472,6 +3727,91 @@ void initJsmSettings(CmdRegistry *commandRegistry)
+@@ -3472,6 +3753,91 @@ void initJsmSettings(CmdRegistry *commandRegistry)
  	commandRegistry->add((new JSMAssignment<float>(*return_deadzone_cutoff_angle))
  	    ->setHelp("In HYBRID_AIM stick mode, angle to the center in which the return deadzone is fully active.\n"\
  			      "Valid values range from 0 to 90"));
@@ -1455,7 +1666,7 @@ index 48d1fce..b2a85e5 100644
  		
  
  }
-@@ -3586,6 +3926,18 @@ int main(int argc, char *argv[])
+@@ -3586,6 +3952,18 @@ int main(int argc, char *argv[])
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "LSR", mappings[(int)ButtonID::LSR], true));
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "RSR", mappings[(int)ButtonID::RSR], true));
  
@@ -1474,6 +1685,13 @@ index 48d1fce..b2a85e5 100644
  	// Add Macro commands
  	commandRegistry.add((new JSMMacro("RESET_MAPPINGS"))->SetMacro(bind(&do_RESET_MAPPINGS, &commandRegistry))->setHelp("Delete all custom bindings and reset to default,\nand run script OnReset.txt in JSM_DIRECTORY."));
  	commandRegistry.add((new JSMMacro("NO_GYRO_BUTTON"))->SetMacro(bind(&do_NO_GYRO_BUTTON))->setHelp("Enable gyro at all times, without any GYRO_OFF binding."));
+@@ -3694,4 +4072,4 @@ int main(int argc, char *argv[])
+ #endif
+ 	cleanUp();
+ 	return 0;
+-}
++}
+\ No newline at end of file
 diff --git a/JoyShockMapper/src/win32/FakerInputBackend.cpp b/JoyShockMapper/src/win32/FakerInputBackend.cpp
 new file mode 100644
 index 0000000..e328200
