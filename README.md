@@ -189,8 +189,9 @@ FAAL_LOCAL_TURN_AXIS = 0      # 仅 LOCAL：0=Y(偏航)  1=Z(翻滚)
 
 | 命令 | 作用 |
 |---|---|
-| `FAAL_*` 参数（16 个） | 同一套滤波器参数，两条路通用 |
+| `FAAL_*` 参数（16 个） | 同一套滤波器参数（17 个），两条路通用 |
 | `FAAL_ENABLED` | **总开关**。0 = 完全旁路（不滤波也不抑制），1 = 正常工作 |
+| `FAAL_HYST_FALL_FAST_TIME` | 抑制**释放**的快降时间（秒）。0 = 自动按 FALL_TIME × 0.446；填值可让释放比介入更快 |
 | `FAAL_SMOOTH_THRESHOLD` | 平滑的开关与强度（deg/s）。0 = 不平滑；大于 0 时，低于该速度才平滑。**不影响抑制** |
 | `FAAL_TRACE_START` / `FAAL_TRACE_STOP` | 逐帧记录 / 写出 `faal_trace.csv` |
 | `FAAL_PSMOTION` / `FAAL_LOCALAXIS` | 临时按顺序切换上面两个设置，不改配置文件 |

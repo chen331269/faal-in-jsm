@@ -51,6 +51,38 @@ index 8fb4bb5..e21eb1b 100644
  endif ()
  
  if (LINUX)
+diff --git a/JoyShockMapper/include/DigitalButton.h b/JoyShockMapper/include/DigitalButton.h
+index dd0d4a9..1e09c3c 100644
+--- a/JoyShockMapper/include/DigitalButton.h
++++ b/JoyShockMapper/include/DigitalButton.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include "faal.h"
++
+ #include "pocket_fsm.h"
+ #include "JoyShockMapper.h"
+ #include "Gamepad.h"
+@@ -120,6 +122,7 @@ public:
+ 	struct Context
+ 	{
+ 		Context(Gamepad::Callback virtualControllerCallback, shared_ptr<MotionIf> mainMotion);
++	~Context();
+ 		deque<pair<ButtonID, KeyCode>> gyroActionQueue; // Queue of gyro control actions currently in effect
+ 		deque<pair<ButtonID, KeyCode>> activeTogglesQueue;
+ 		deque<ButtonID> chordStack; // Represents the current active _buttons in order from most recent to latest
+@@ -131,6 +134,11 @@ public:
+ 		shared_ptr<MotionIf> rightMainMotion = nullptr;
+ 		shared_ptr<MotionIf> leftMotion = nullptr;
+ 		int nn = 0;
++	// FAAL filter state is per physical device (a merged joycon pair shares it on
++	// purpose). Kept here so two controllers never mix their filter history.
++	Faal *_faal = nullptr;
++	unsigned _faalEpoch = 0;
++	bool _faalWasEnabled = true;
+ 
+ 		void updateChordStack(bool isPressed, ButtonID index);
+ 	};
 diff --git a/JoyShockMapper/include/FAALAssignments.h b/JoyShockMapper/include/FAALAssignments.h
 new file mode 100644
 index 0000000..993af61
@@ -248,15 +280,16 @@ index 5f0dedb..ee2f6b3 100644
 +FakerInputBackend &getFakerBackend();
 \ No newline at end of file
 diff --git a/JoyShockMapper/include/JoyShockMapper.h b/JoyShockMapper/include/JoyShockMapper.h
-index 48065c1..be0f969 100644
+index 48065c1..1f0369d 100644
 --- a/JoyShockMapper/include/JoyShockMapper.h
 +++ b/JoyShockMapper/include/JoyShockMapper.h
-@@ -268,6 +268,22 @@ enum class SettingID
+@@ -268,6 +268,23 @@ enum class SettingID
  	RETURN_DEADZONE_ANGLE_CUTOFF,
  	TELEMETRY_ENABLED,
  	TELEMETRY_PORT,
 +	FAAL_HYST_RISE_TIME,
 +	FAAL_HYST_FALL_TIME, // 原 FAAL_HYST_FALL_SLOW_TIME 改名
++	FAAL_HYST_FALL_FAST_TIME, // 0 = 自动按 FALL_TIME × 0.446 推导
 +	FAAL_PEAK_DECAY_TIME,
 +	FAAL_FREEZE_DURATION_SEC,
 +	FAAL_DRIFT_HOLD_TIME_SEC,
@@ -274,7 +307,7 @@ index 48065c1..be0f969 100644
  };
  
  // constexpr are like #define but with respect to typeness
-@@ -414,6 +430,7 @@ enum class GyroOutput
+@@ -414,6 +431,7 @@ enum class GyroOutput
  	LEFT_STICK,
  	RIGHT_STICK,
  	PS_MOTION,
@@ -284,10 +317,10 @@ index 48065c1..be0f969 100644
  
 diff --git a/JoyShockMapper/include/faal.h b/JoyShockMapper/include/faal.h
 new file mode 100644
-index 0000000..e00303f
+index 0000000..0a9f04b
 --- /dev/null
 +++ b/JoyShockMapper/include/faal.h
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,547 @@
 +/*
 + * faal.h - FAAL anti-shake filter, C99 ABI.
 + *
@@ -359,6 +392,10 @@ index 0000000..e00303f
 +	float dirChangeMagRatio;
 +	float dirChangeAngleRad;
 +	float smoothTimeSec;    /* s, memory of the reversal reference */
++
++	/* 0 = derive as hystFallTime * 0.446, which is the historical behaviour.
++	 * Set it to release suppression faster than it engages with a custom value. */
++	float hystFallFastTime;
 +} FaalParams;
 +
 +typedef struct Faal Faal;
@@ -418,7 +455,7 @@ index 0000000..e00303f
 +struct Faal
 +{
 +	FaalParams params;
-+	float hystFallFastTime; /* derived: hystFallTime * 0.446 */
++	float cosAngleRad; /* cosf(dirChangeAngleRad), updated only when params change */
 +	Axis ax;
 +	Axis ay;
 +	Axis az;
@@ -491,7 +528,7 @@ index 0000000..e00303f
 +
 +	/* 2) frame-rate independent hysteresis coefficients */
 +	riseFactor = 1.0f - expf(-dt / p->hystRiseTime);
-+	fastFallFactor = 1.0f - expf(-dt / (p->hystFallTime * 0.446f));
++	fastFallFactor = 1.0f - expf(-dt / p->hystFallFastTime);
 +	slowFallFactor = 1.0f - expf(-dt / p->hystFallTime);
 +	fallFactor = fastFallFactor + (slowFallFactor - fastFallFactor) * st->suppressHyst;
 +	fallFactor = clampf(fallFactor, 0.0f, 1.0f);
@@ -581,7 +618,7 @@ index 0000000..e00303f
 +	return out;
 +}
 +
-+static int check_reversal_3d(const FaalParams *p,
++static int check_reversal_3d(const FaalParams *p, float cosAngle,
 +                             float cx, float cy, float cz,
 +                             float px, float py, float pz)
 +{
@@ -599,7 +636,7 @@ index 0000000..e00303f
 +	curLen = sqrtf(curLen2);
 +	cosTheta = clampf((px * cx + py * cy + pz * cz) / (prevLen * curLen), -1.0f, 1.0f);
 +
-+	if (cosTheta >= cosf(p->dirChangeAngleRad))
++	if (cosTheta >= cosAngle)
 +		return 0;
 +
 +	sinTheta = sqrtf(clampf(1.0f - cosTheta * cosTheta, 0.0f, 1.0f));
@@ -668,6 +705,8 @@ index 0000000..e00303f
 +	out->dirChangeMagRatio = 0.3f;
 +	out->dirChangeAngleRad = 1.570796f;
 +	out->smoothTimeSec = 0.1f;
++
++	out->hystFallFastTime = 0.0f; /* auto: hystFallTime * 0.446 */
 +}
 +
 +void faal_init(Faal *ctx, const FaalParams *params)
@@ -684,20 +723,34 @@ index 0000000..e00303f
 +		FaalParams d;
 +		faal_defaults(&d);
 +		ctx->params = d;
-+		ctx->hystFallFastTime = d.hystFallTime * 0.446f;
++		ctx->cosAngleRad = cosf(d.dirChangeAngleRad);
 +	}
 +}
 +
 +void faal_set_params(Faal *ctx, const FaalParams *params)
 +{
 +	FaalParams p;
++	unsigned int size;
 +
 +	if (!ctx || !params)
 +		return;
 +
-+	p = *params;
-+	if (p.size == 0)
-+		p.size = (unsigned int)sizeof(FaalParams);
++	/* Start from defaults, then copy only as many bytes as the caller says it
++	 * has: a host built against an older header keeps working instead of
++	 * reading past the end of its own struct. */
++	faal_defaults(&p);
++	size = params->size;
++	if (size == 0 || size > (unsigned int)sizeof(FaalParams))
++		size = (unsigned int)sizeof(FaalParams);
++	memcpy(&p, params, size);
++	p.size = (unsigned int)sizeof(FaalParams);
++
++	/* Reject a NaN parameter block outright: clampf cannot repair it, and one
++	 * NaN poisons every state it touches. */
++	if (!(p.peakDecayTime == p.peakDecayTime))
++	{
++		faal_defaults(&p);
++	}
 +
 +	/* Only clamp what would otherwise divide by zero or blow up. */
 +	p.hystRiseTime = clampf(p.hystRiseTime, 1e-4f, 1.0f);
@@ -706,9 +759,23 @@ index 0000000..e00303f
 +	p.smoothTimeSec = clampf(p.smoothTimeSec, 1e-3f, 1.0f);
 +	p.dropCurve = clampf(p.dropCurve, 0.1f, 10.0f);
 +	p.oneEuroFcMin = clampf(p.oneEuroFcMin, 0.01f, 100.0f);
++	p.oneEuroBeta = clampf(p.oneEuroBeta, 0.0f, 100.0f);
++	p.dirChangeAngleRad = clampf(p.dirChangeAngleRad, 0.1f, 3.14159265f);
++	p.dirChangeMagRatio = clampf(p.dirChangeMagRatio, 0.0f, 1.0f);
++	p.driftThreshold = clampf(p.driftThreshold, 0.0f, 100.0f);
++	p.driftHoldTimeSec = clampf(p.driftHoldTimeSec, 0.0f, 10.0f);
++	p.freezeDurationSec = clampf(p.freezeDurationSec, 0.0f, 1.0f);
++	p.freezeOutMul = clampf(p.freezeOutMul, 0.0f, 1.0f);
++	p.smoothThreshold = clampf(p.smoothThreshold, 0.0f, 1000.0f);
++
++	/* 0 keeps the historical ratio, so existing configs behave identically. */
++	if (p.hystFallFastTime > 0.0f)
++		p.hystFallFastTime = clampf(p.hystFallFastTime, 1e-4f, p.hystFallTime);
++	else
++		p.hystFallFastTime = p.hystFallTime * 0.446f;
 +
 +	ctx->params = p;
-+	ctx->hystFallFastTime = p.hystFallTime * 0.446f;
++	ctx->cosAngleRad = cosf(p.dirChangeAngleRad);
 +}
 +
 +void faal_reset(Faal *ctx)
@@ -765,14 +832,14 @@ index 0000000..e00303f
 +				float cosTheta = clampf((ctx->dirX * x + ctx->dirY * y) /
 +				                        (sqrtf(prevLen2) * sqrtf(curLen2)),
 +				                        -1.0f, 1.0f);
-+				if (cosTheta < cosf(p->dirChangeAngleRad))
++				if (cosTheta < ctx->cosAngleRad)
 +					forceSuppress = sqrtf(clampf(1.0f - cosTheta * cosTheta, 0.0f, 1.0f)) >
 +					                p->dirChangeMagRatio;
 +			}
 +		}
 +		else
 +		{
-+			forceSuppress = check_reversal_3d(p, x, y, z, ctx->dirX, ctx->dirY, ctx->dirZ);
++			forceSuppress = check_reversal_3d(p, ctx->cosAngleRad, x, y, z, ctx->dirX, ctx->dirY, ctx->dirZ);
 +		}
 +	}
 +
@@ -832,6 +899,26 @@ index 0000000..f8cafd0
 +unsigned long long FaalTraceRecordedFrames();
 +void FaalTraceRecord(const FaalTraceInput& in, const FaalParams& applied);
 +unsigned long long FaalTraceStopAndWrite(const char* path);
+diff --git a/JoyShockMapper/src/DigitalButton.cpp b/JoyShockMapper/src/DigitalButton.cpp
+index b492d22..67ee697 100644
+--- a/JoyShockMapper/src/DigitalButton.cpp
++++ b/JoyShockMapper/src/DigitalButton.cpp
+@@ -4,6 +4,15 @@
+ #include "SettingsManager.h"
+ #include <atomic>
+ 
++DigitalButton::Context::~Context()
++{
++	if (_faal != nullptr)
++	{
++		faal_free(_faal);
++		_faal = nullptr;
++	}
++}
++
+ void DigitalButton::Context::updateChordStack(bool isPressed, ButtonID id)
+ {
+ 	if (id < ButtonID::SIZE || id >= ButtonID::T1) // Can't chord touch stick _buttons
 diff --git a/JoyShockMapper/src/JoyShock.cpp b/JoyShockMapper/src/JoyShock.cpp
 index 6c63fba..a056c0d 100644
 --- a/JoyShockMapper/src/JoyShock.cpp
@@ -1074,36 +1161,39 @@ index 0000000..36cf148
 +	return (unsigned long long)n;
 +}
 diff --git a/JoyShockMapper/src/main.cpp b/JoyShockMapper/src/main.cpp
-index 48d1fce..59d3ae0 100644
+index 48d1fce..953cd90 100644
 --- a/JoyShockMapper/src/main.cpp
 +++ b/JoyShockMapper/src/main.cpp
-@@ -24,6 +24,10 @@
+@@ -1,3 +1,5 @@
++// This is the only translation unit that compiles the FAAL implementation.
++#define FAAL_IMPLEMENTATION
+ #include "JoyShockMapper.h"
+ #include "JSMVersion.h"
+ #include "DigitalButton.h"
+@@ -24,6 +26,8 @@
  #include <sstream>
  #define _USE_MATH_DEFINES
  #include <math.h> // M_PI
-+#define FAAL_IMPLEMENTATION
-+#include "faal.h"
 +#include "faal_filter.h"
 +#include "PlatformDefinitions.h"
  
  #ifdef _WIN32
  #include <shellapi.h>
-@@ -46,7 +50,14 @@ vector<JSMButton> mappings;      // array enables use of for each loop and other
+@@ -46,7 +50,13 @@ vector<JSMButton> mappings;      // array enables use of for each loop and other
  float os_mouse_speed = 1.0;
  float last_flick_and_rotation = 0.0;
  bool gyroOneEuroEnabled = false;
 +// FAAL is a plain C library; this translation unit owns the one context and
 +// is the only place that compiles its implementation.
-+static Faal* g_faal = nullptr;
 +static FaalParams g_lastFaalParams;
-+static std::atomic<bool> s_faalResetRequested{ false };
++static std::atomic<unsigned> g_faalResetEpoch{ 1 };
 +
  unique_ptr<PollingThread> autoLoadThread;
 +
  unique_ptr<JSM::AutoConnect> autoConnectThread;
  std::atomic<int> g_gyroGlobalOffCount(0);
  std::atomic<int> g_gyroGlobalOnCount(0);
-@@ -437,6 +448,74 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
+@@ -437,6 +447,74 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
  	jsl->SetTriggerEffect(jc->_handle, jc->_leftEffect, jc->_rightEffect);
  }
  
@@ -1178,7 +1268,7 @@ index 48d1fce..59d3ae0 100644
  void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
  {
  
-@@ -449,6 +528,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -449,6 +527,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
  	jc->_timeNow = timeNow;
  
@@ -1186,7 +1276,7 @@ index 48d1fce..59d3ae0 100644
  	if (triggerCalibrationStep)
  	{
  		calibrateTriggers(jc);
-@@ -470,18 +550,166 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -470,18 +549,169 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  	}
  	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
  
@@ -1201,6 +1291,7 @@ index 48d1fce..59d3ae0 100644
 +		// 抑制系统（3 个用户参数）
 +		p.hystRiseTime = jc->getSetting(SettingID::FAAL_HYST_RISE_TIME);
 +		p.hystFallTime = jc->getSetting(SettingID::FAAL_HYST_FALL_TIME);
++		p.hystFallFastTime = jc->getSetting(SettingID::FAAL_HYST_FALL_FAST_TIME);
 +		p.peakDecayTime = jc->getSetting(SettingID::FAAL_PEAK_DECAY_TIME);
 +
 +		// 独立参数
@@ -1227,9 +1318,9 @@ index 48d1fce..59d3ae0 100644
 +	p.dropSensitivity = 2.4f;
 +	p.dropCurve = 2.0f;
 +
-+	if (g_faal == nullptr)
-+		g_faal = faal_new();
-+	faal_set_params(g_faal, &p);
++	if (jc->_context->_faal == nullptr)
++		jc->_context->_faal = faal_new();
++	faal_set_params(jc->_context->_faal, &p);
 +	g_lastFaalParams = p;
 +
  	float inGyroX, inGyroY, inGyroZ;
@@ -1240,10 +1331,9 @@ index 48d1fce..59d3ae0 100644
 +	const bool faalEnabled = jc->getSetting(SettingID::FAAL_ENABLED) > 0.5f;
 +	// Re-enabling starts from a clean filter instead of whatever state it held when
 +	// it was switched off, so the first frames after the switch are predictable.
-+	static bool s_faalWasEnabled = true;
-+	if (faalEnabled && !s_faalWasEnabled)
-+		s_faalResetRequested.store(true, std::memory_order_release);
-+	s_faalWasEnabled = faalEnabled;
++	if (faalEnabled && !jc->_context->_faalWasEnabled)
++		g_faalResetEpoch.fetch_add(1, std::memory_order_release);
++	jc->_context->_faalWasEnabled = faalEnabled;
 +
 +	GyroOutput gyroOutput = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
 +	// OFF emits nothing but still runs the filter, so switching back to
@@ -1302,10 +1392,13 @@ index 48d1fce..59d3ae0 100644
 +
 +		if (faalEnabled)
 +			{
-+			if (s_faalResetRequested.exchange(false))
-+				faal_reset(g_faal);
++			if (jc->_context->_faalEpoch != g_faalResetEpoch.load(std::memory_order_acquire))
++				{
++					faal_reset(jc->_context->_faal);
++					jc->_context->_faalEpoch = g_faalResetEpoch.load(std::memory_order_relaxed);
++				}
 +			float v[2] = { psYaw, psPitch };
-+			faal_process(g_faal, v, 2, deltaTime);
++			faal_process(jc->_context->_faal, v, 2, deltaTime);
 +			psYaw = v[0];
 +			psPitch = v[1];
 +		}
@@ -1354,7 +1447,7 @@ index 48d1fce..59d3ae0 100644
  	// Quat reverseRotation = Quat(cosf(angle * 0.5f), normAxis.x, normAxis.y, normAxis.z);
  	// reverseRotation.Normalize();
  	// jc->_lastGrav *= reverseRotation;
-@@ -539,36 +767,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -539,36 +769,36 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		int mouse_x_flag = (int)jc->getSetting<GyroAxisMask>(SettingID::MOUSE_X_FROM_GYRO_AXIS);
  		if ((mouse_x_flag & (int)GyroAxisMask::X) > 0)
  		{
@@ -1400,7 +1493,7 @@ index 48d1fce..59d3ae0 100644
  	}
  	else
  	{
-@@ -593,12 +821,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -593,12 +823,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  			if (gyroSpace == GyroSpace::PLAYER_TURN)
  			{
  				// grav dot gyro axis (but only Y (yaw) and Z (roll))
@@ -1415,7 +1508,7 @@ index 48d1fce..59d3ae0 100644
  			}
  			else // PLAYER_LEAN
  			{
-@@ -627,23 +855,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -627,23 +857,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisY *= lengthReciprocal;
  						rollAxisZ *= lengthReciprocal;
  
@@ -1443,7 +1536,7 @@ index 48d1fce..59d3ae0 100644
  			// project local pitch axis (X) onto gravity plane
  			// super simple since our point is only non-zero in one axis
  			float gravDotPitchAxis = normGravX;
-@@ -661,7 +889,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -661,7 +891,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  				pitchAxisZ *= lengthReciprocal;
  
  				// get global pitch factor (dot)
@@ -1452,7 +1545,7 @@ index 48d1fce..59d3ae0 100644
  				// by the way, pinch it towards the nonsense limit
  				gyroY *= sideReduction;
  
-@@ -683,7 +911,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -683,7 +913,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  						rollAxisZ *= lengthReciprocal;
  
  						// get global roll factor (dot)
@@ -1461,7 +1554,7 @@ index 48d1fce..59d3ae0 100644
  						// by the way, pinch because we rely on a good pitch vector here
  						gyroX *= sideReduction;
  					}
-@@ -697,6 +925,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -697,6 +927,26 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		}
  	}
  	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -1471,10 +1564,13 @@ index 48d1fce..59d3ae0 100644
 +		const float inX = gyroX, inY = gyroY;
 +		if (faalEnabled)
 +			{
-+				if (s_faalResetRequested.exchange(false))
-+					faal_reset(g_faal);
++				if (jc->_context->_faalEpoch != g_faalResetEpoch.load(std::memory_order_acquire))
++					{
++						faal_reset(jc->_context->_faal);
++						jc->_context->_faalEpoch = g_faalResetEpoch.load(std::memory_order_relaxed);
++					}
 +				float v[2] = { gyroX, gyroY };
-+				faal_process(g_faal, v, 2, deltaTime);
++				faal_process(jc->_context->_faal, v, 2, deltaTime);
 +				gyroX = v[0];
 +				gyroY = v[1];
 +			}
@@ -1485,7 +1581,7 @@ index 48d1fce..59d3ae0 100644
  	// do gyro smoothing
  	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
  	if (useDecaySmoothing)
-@@ -1597,7 +1842,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1597,7 +1847,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
  	}
  
@@ -1494,7 +1590,7 @@ index 48d1fce..59d3ae0 100644
  	if (!jc->processed_gyro_stick)
  	{
  		if (gyroOutput == GyroOutput::LEFT_STICK)
-@@ -1612,7 +1857,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1612,7 +1862,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  		{
  			if (jc->hasVirtualController())
  			{
@@ -1503,31 +1599,31 @@ index 48d1fce..59d3ae0 100644
  			}
  		}
  	}
-@@ -1646,6 +1891,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
+@@ -1646,6 +1896,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
  
  void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
  {
-+	s_faalResetRequested.store(true, std::memory_order_release);
++	g_faalResetEpoch.fetch_add(1, std::memory_order_release);
  	handle_to_joyshock.clear();
  	this_thread::sleep_for(100ms);
  	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
-@@ -1774,6 +2020,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
+@@ -1774,6 +2025,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
  	{
  		jc->resetOneEuroFilter();
  	}
-+	s_faalResetRequested.store(true, std::memory_order_release);
++	g_faalResetEpoch.fetch_add(1, std::memory_order_release);
  	g_gyroGlobalOffCount.store(0);
  	g_gyroGlobalOnCount.store(0);
  	g_hasGyroOnAllBinding.store(false);
-@@ -1846,6 +2093,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
+@@ -1846,6 +2098,7 @@ bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadO
  	 
  	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
  	jsl->DisconnectAndDisposeAll();
-+	s_faalResetRequested.store(true, std::memory_order_release);
++	g_faalResetEpoch.fetch_add(1, std::memory_order_release);
  	connectDevices(mergeJoycons, selectedDeviceIds);
  	jsl->SetCallback(&joyShockPollCallback);
  	jsl->SetTouchCallback(&touchCallback);
-@@ -1887,6 +2135,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
+@@ -1887,6 +2140,38 @@ bool do_IGNORE_OS_MOUSE_SPEED()
  	return true;
  }
  
@@ -1566,15 +1662,15 @@ index 48d1fce..59d3ae0 100644
  bool do_ONE_EURO_FILTER()
  {
  	COUT << "One Euro Filter enabled for gyro\n";
-@@ -1895,6 +2175,7 @@ bool do_ONE_EURO_FILTER()
+@@ -1895,6 +2180,7 @@ bool do_ONE_EURO_FILTER()
  	{
  		jc->resetOneEuroFilter();
  	}
-+	s_faalResetRequested.store(true, std::memory_order_release);
++	g_faalResetEpoch.fetch_add(1, std::memory_order_release);
  	return true;
  }
  
-@@ -3472,6 +3753,91 @@ void initJsmSettings(CmdRegistry *commandRegistry)
+@@ -3472,6 +3758,96 @@ void initJsmSettings(CmdRegistry *commandRegistry)
  	commandRegistry->add((new JSMAssignment<float>(*return_deadzone_cutoff_angle))
  	    ->setHelp("In HYBRID_AIM stick mode, angle to the center in which the return deadzone is fully active.\n"\
  			      "Valid values range from 0 to 90"));
@@ -1590,9 +1686,14 @@ index 48d1fce..59d3ae0 100644
 +	    ->setHelp("抑制快进时间（秒）。抑制从 0 到满的基准时长。"));
 +
 +	auto faalHystFallTime = new JSMSetting<float>(SettingID::FAAL_HYST_FALL_TIME, 0.065f);
++	auto faalHystFallFast = new JSMSetting<float>(SettingID::FAAL_HYST_FALL_FAST_TIME, 0.0f);
++	faalHystFallFast->setFilter([](float c, float n) { return std::clamp(n, 0.0f, 1.0f); });
++	SettingsManager::add(faalHystFallFast);
 +	SettingsManager::add(faalHystFallTime);
 +	commandRegistry->add((new JSMAssignment<float>("FAAL_HYST_FALL_TIME", *faalHystFallTime))
 +	    ->setHelp("抑制慢出时间（秒）。满抑制时的解除基准时长。"));
++	commandRegistry->add((new JSMAssignment<float>("FAAL_HYST_FALL_FAST_TIME", *faalHystFallFast))
++	    ->setHelp("抑制释放的快降时间（秒）。0 = 自动按 FALL_TIME × 0.446 推导。"));
 +
 +	auto faalPeakDecayTime = new JSMSetting<float>(SettingID::FAAL_PEAK_DECAY_TIME, 0.065f);
 +	SettingsManager::add(faalPeakDecayTime);
@@ -1666,7 +1767,7 @@ index 48d1fce..59d3ae0 100644
  		
  
  }
-@@ -3586,6 +3952,18 @@ int main(int argc, char *argv[])
+@@ -3586,6 +3962,18 @@ int main(int argc, char *argv[])
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "LSR", mappings[(int)ButtonID::LSR], true));
  	commandRegistry.add(new JSMAssignment<Mapping>("SR", "RSR", mappings[(int)ButtonID::RSR], true));
  
@@ -1685,7 +1786,7 @@ index 48d1fce..59d3ae0 100644
  	// Add Macro commands
  	commandRegistry.add((new JSMMacro("RESET_MAPPINGS"))->SetMacro(bind(&do_RESET_MAPPINGS, &commandRegistry))->setHelp("Delete all custom bindings and reset to default,\nand run script OnReset.txt in JSM_DIRECTORY."));
  	commandRegistry.add((new JSMMacro("NO_GYRO_BUTTON"))->SetMacro(bind(&do_NO_GYRO_BUTTON))->setHelp("Enable gyro at all times, without any GYRO_OFF binding."));
-@@ -3694,4 +4072,4 @@ int main(int argc, char *argv[])
+@@ -3694,4 +4082,4 @@ int main(int argc, char *argv[])
  #endif
  	cleanUp();
  	return 0;
